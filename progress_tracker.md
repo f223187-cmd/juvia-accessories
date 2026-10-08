@@ -7,7 +7,7 @@
 6. View Interaction History (Customer Web View + Backend)
 7. Perform 3D Construction (Admin Web Upload UI + 3D Asset Pipeline)
 8. Analyze User Behavior (Admin Analytics Dashboard + Backend)
+9. Publish to GitHub and Vercel (public source and HTTPS production app; deployment/API smoke checks passed)
 
 ### Remaining Modules
-1. Guided Mobile Virtual Try-On (wrist/finger hand guidance, hand/neck detection, two wrist/finger photos and three automatic necklace photos)
-2. Publish Juvia to GitHub and deploy the HTTPS web app to Vercel for phone camera testing
+1. Validate Guided Mobile Virtual Try-On on a physical phone (wrist/finger guidance, hand/neck detection, two hand/wrist photos and three automatic necklace photos)

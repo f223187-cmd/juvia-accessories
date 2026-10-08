@@ -24,7 +24,11 @@ Open http://127.0.0.1:8000. Set `JUVIA_ADMIN_EMAIL` to the email of the account 
 - Assistant: `POST /api/chat`
 - History: `GET /api/history`
 - 3D assets: `POST /api/assets` (admin; GLB/GLTF/OBJ), `GET /api/assets`
-- VTO: `POST /api/vto/landmarks` (webcam image upload)
+- VTO: `GET /api/vto/status`; live MediaPipe inference runs in the phone browser
 - Analytics: `GET /api/analytics` (admin)
 
 The assistant uses a local product/review retrieval baseline with no external model requirement. VTO runs MediaPipe Tasks Vision in the mobile browser, avoiding server-side camera uploads. The guided capture flow asks for two wrist views for watches and bracelets, two hand/finger views for rings, and three automatically captured neck views for necklaces. Camera access requires HTTPS on phones. Captured photos remain in the browser session and are not uploaded; VTO currently does not render the accessory overlay. Models and the WASM runtime load from Google's model host and jsDelivr the first time the flow starts.
+
+## Try VTO on a phone
+
+Open https://juvia-accessories.vercel.app in your mobile browser, create an account, and tap **Virtual try-on**. Choose Watch, Bracelet, Ring, or Necklace and tap **Start guided capture**. Allow camera access and follow the pose prompt; detection pop-ups appear and photos are captured after the target stays in frame. Necklaces take three views automatically. The first start downloads the MediaPipe browser runtime and models; keep the page open while they load. Camera frames and captured photos stay on the device.
