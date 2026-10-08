@@ -5,9 +5,9 @@ const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.
 
 function vtoPlan(category){
   if(category==='necklaces')return [
-    {target:'neck',label:'Neck — face forward',hint:'Face the camera and relax your shoulders.'},
-    {target:'neck',label:'Neck — turn slightly left',hint:'Turn your head a little to your left and hold still.'},
-    {target:'neck',label:'Neck — turn slightly right',hint:'Turn your head a little to your right and hold still.'}
+    {target:'neck',pose:'front',label:'Neck — front view',hint:'Face the camera and relax your shoulders.'},
+    {target:'neck',pose:'left',label:'Neck — left angle',hint:'Turn your nose slightly toward the left edge of the screen.'},
+    {target:'neck',pose:'right',label:'Neck — right angle',hint:'Turn your nose slightly toward the right edge of the screen.'}
   ];
   if(category==='rings')return [
     {target:'hand',label:'Hand — open palm',hint:'Hold one hand forward with fingers comfortably spread.'},
@@ -60,7 +60,15 @@ function frameStatus(task,timestamp){
       if(cx<.18||cx>.82||cy<.12||cy>.82)guidance='Center your face and neck inside the guide.';
       else if(width<.24)guidance='Move a little closer to the camera.';
       else if(width>.85)guidance='Move slightly farther from the camera.';
-      else{ready=true;guidance='Neck detected. Hold still.';}
+      else{
+        const cheekMid=(rawPoints[234].x+rawPoints[454].x)/2;
+        const faceWidth=Math.max(.01,Math.abs(rawPoints[454].x-rawPoints[234].x));
+        const screenYaw=(cheekMid-rawPoints[1].x)/faceWidth;
+        if(task.pose==='front'&&Math.abs(screenYaw)>.045)guidance='Look straight at the camera.';
+        else if(task.pose==='left'&&screenYaw>-.055)guidance='Turn your nose slightly toward the left edge of the screen.';
+        else if(task.pose==='right'&&screenYaw<.055)guidance='Turn your nose slightly toward the right edge of the screen.';
+        else{ready=true;guidance='Neck detected. Hold still.';}
+      }
       landmarks=[152,234,454].map(i=>({x:rawPoints[i].x,y:Math.min(1,rawPoints[i].y+.14),z:rawPoints[i].z}));
     }
   }else{
