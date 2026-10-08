@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+juvia.db
+juvia.db-*
+uploads/*
+!.gitkeep
+.env
+.env.*
+!.env.example
+.vercel/
+.venv/
+node_modules/
