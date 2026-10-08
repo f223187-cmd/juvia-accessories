@@ -10,3 +10,5 @@ uploads/*
 .vercel/
 .venv/
 node_modules/
+
+.vercel
