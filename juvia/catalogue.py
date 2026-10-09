@@ -9,11 +9,11 @@ router=APIRouter()
 @router.get('/api/products')
 def products(category:Optional[str]=None,q:Optional[str]=None):
     if category: validate_category(category)
-    sql='SELECT * FROM products'; args=[]; clauses=['published=1']
-    if category: clauses.append('category=?'); args.append(category)
-    if q: clauses.append('(name LIKE ? OR description LIKE ?)'); args.extend([f'%{q}%',f'%{q}%'])
+    sql="SELECT p.*, EXISTS(SELECT 1 FROM assets a WHERE a.product_id=p.id AND lower(a.filename) LIKE '%.glb') AS has_3d_asset FROM products p"; args=[]; clauses=['p.published=1']
+    if category: clauses.append('p.category=?'); args.append(category)
+    if q: clauses.append('(p.name LIKE ? OR p.description LIKE ?)'); args.extend([f'%{q}%',f'%{q}%'])
     if clauses: sql+=' WHERE '+' AND '.join(clauses)
-    sql+=' ORDER BY id DESC'
+    sql+=' ORDER BY p.id DESC'
     with db() as c: return [dict(r) for r in c.execute(sql,args)]
 @router.get('/api/admin/products')
 def admin_products(u=Depends(admin)):

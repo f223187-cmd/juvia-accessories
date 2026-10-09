@@ -1,9 +1,9 @@
 ### Completed Locally
 1. Customer and admin views use the existing role system; admin APIs remain role-protected.
 2. Product add/edit/delete and publish/unpublish controls are wired to the catalogue APIs.
-3. Scraped image-only products can be imported as unpublished zero-price test entries; admin can also upload JPG, PNG, and WebP product images.
+3. Scraped image-only products can be imported as unpublished zero-price test entries; pages without an actual product image are skipped. Admin can also upload JPG, PNG, and WebP product images.
 4. VTO supports front/rear camera switching, mirrored-coordinate correction, MediaPipe landmark tracking, and an image preview fallback.
-5. Published products can expose their linked GLB/GLTF model to VTO; the model is positioned, scaled, and rotated from detected landmarks.
+5. Published products can expose their linked self-contained GLB model to VTO; the model is positioned, scaled, and rotated from detected landmarks. The catalogue exposes the VTO action for image-free products with a linked GLB.
 6. Firebase project has the `juvia-web` app registered; Email/Password auth is enabled and the Standard Firestore database was created in `asia-south1` with production-mode rules.
 7. Juvia's web client is configured for Firebase Auth; the API verifies Firebase ID tokens and maps roles using `JUVIA_ADMIN_EMAIL`. The approved admin email is set in Vercel Production.
 8. The user's watch GLB is bundled at `web/assets/models/juvia-watch.glb`; startup idempotently seeds a published, image-free `Watch VTO demo` product linked to it.

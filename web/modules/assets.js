@@ -9,7 +9,7 @@ async function loadAssets(){
     select.innerHTML='<option value="">No product link</option>'+products.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
     $('assets').innerHTML=rows.map(asset=>{
       const product=products.find(p=>p.id===asset.product_id),url='/uploads/'+encodeURIComponent(asset.path);
-      return `<article class="card"><b>${esc(asset.filename)}</b><p class="muted">${product?'Linked to '+esc(product.name):'Not linked to a product'}</p>${/\.(glb|gltf)$/i.test(asset.filename)?`<model-viewer src="${url}" camera-controls style="width:100%;height:280px"></model-viewer>`:''}</article>`;
+      return `<article class="card"><b>${esc(asset.filename)}</b><p class="muted">${product?'Linked to '+esc(product.name):'Not linked to a product'}</p>${/\.glb$/i.test(asset.filename)?`<model-viewer src="${url}" camera-controls style="width:100%;height:280px"></model-viewer>`:''}</article>`;
     }).join('')||'<p>No 3D assets uploaded.</p>';
   }catch(e){msg(e.message);}
 }

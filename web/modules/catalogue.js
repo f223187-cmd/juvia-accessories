@@ -3,7 +3,7 @@ async function loadProducts() {
   try {
     const p=new URLSearchParams(); if($('category').value)p.set('category',$('category').value); if($('search').value)p.set('q',$('search').value);
     const rows=await api('/products?'+p);
-    $('products').innerHTML=rows.map(x=>`<article class="card">${x.image?`<img src="${esc(x.image)}" alt="${esc(x.name)}">`:''}<h3>${esc(x.name)}</h3><p class="muted">${esc(x.category)} · ${esc(x.description)}</p><div class="price">$${Number(x.price).toFixed(2)}</div>${x.image?`<button class="secondary" onclick="chooseVtoProduct(${x.id},'${x.category}')">Try this on</button>`:''}<button class="secondary" onclick="review(${x.id})">Rate this item</button><div id="reviews${x.id}"></div><button class="secondary" onclick="getReviews(${x.id})">Reviews</button></article>`).join('')||'<p>No products yet.</p>';
+    $('products').innerHTML=rows.map(x=>`<article class="card">${x.image?`<img src="${esc(x.image)}" alt="${esc(x.name)}">`:''}<h3>${esc(x.name)}</h3><p class="muted">${esc(x.category)} · ${esc(x.description)}</p><div class="price">$${Number(x.price).toFixed(2)}</div>${x.image||x.has_3d_asset?`<button class="secondary" onclick="chooseVtoProduct(${x.id},'${x.category}')">Try this on</button>`:''}<button class="secondary" onclick="review(${x.id})">Rate this item</button><div id="reviews${x.id}"></div><button class="secondary" onclick="getReviews(${x.id})">Reviews</button></article>`).join('')||'<p>No products yet.</p>';
   } catch(e) { msg(e.message); }
 }
 let adminProductRows=[],editingProductId=null;
