@@ -8,18 +8,18 @@ const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.
 
 function vtoPlan(category){
   if(category==='necklaces')return [
-    {target:'neck',pose:'front',label:'Neck — front view',hint:'Face the camera and relax your shoulders.'},
-    {target:'neck',pose:'left',label:'Neck — left angle',hint:'Turn your nose slightly toward the left edge of the screen.'},
-    {target:'neck',pose:'right',label:'Neck — right angle',hint:'Turn your nose slightly toward the right edge of the screen.'}
+    {target:'neck',pose:'front',label:'Neck — front view',hint:'Face forward, keep your head and shoulders in frame, and move hair or clothing away from your neck.'},
+    {target:'neck',pose:'left',label:'Neck — left angle',hint:'Keep your head and neck in frame, then turn your nose slightly toward the left edge of the screen.'},
+    {target:'neck',pose:'right',label:'Neck — right angle',hint:'Keep your head and neck in frame, then turn your nose slightly toward the right edge of the screen.'}
   ];
   if(category==='rings')return [
-    {target:'hand',label:'Hand — open palm',hint:'Hold one hand forward with fingers comfortably spread.'},
-    {target:'finger',label:'Finger — ring finger',hint:'Bring the hand closer and keep your ring finger extended and visible.'}
+    {target:'hand',label:'Hand — open palm',hint:'Hold your full hand close enough to see all fingertips; spread your fingers comfortably.'},
+    {target:'finger',label:'Finger — ring finger',hint:'Bring the hand closer, then hold your ring finger straight and visible with the other fingers relaxed.'}
   ];
   const item=category==='watches'?'Watch':'Bracelet';
   return [
-    {target:'wrist',pose:'outer',label:`Wrist — ${item.toLowerCase()} side`,hint:'Center your wrist and hold the back of your hand toward the camera.'},
-    {target:'wrist',pose:'inner',label:'Wrist — inner side',hint:'Rotate your forearm until your palm faces the camera.'}
+    {target:'wrist',pose:'outer',label:`Wrist — ${item.toLowerCase()} side`,hint:'Show your whole hand and wrist inside the guide with the back of your hand facing the camera.'},
+    {target:'wrist',pose:'inner',label:'Wrist — inner side',hint:'Rotate your forearm until your palm faces the camera; keep your whole hand and wrist in frame.'}
   ];
 }
 function vtoGuideClass(task){return task.target==='neck'?'neck':task.target==='wrist'?'wrist':'hand';}
@@ -110,7 +110,7 @@ async function switchVtoCamera(){
   }finally{button.disabled=false;}
 }
 function frameStatus(task,timestamp){
-  let found=false,ready=false,guidance=task.target==='neck'?'Place your face and neck inside the guide.':'Place one hand inside the guide.';
+  let found=false,ready=false,guidance=task.hint;
   let rawPoints=[],landmarks=[];
   if(task.target==='neck'){
     const result=faceLandmarker.detectForVideo($('camera'),timestamp);rawPoints=result.faceLandmarks?.[0]||[];
@@ -134,9 +134,9 @@ function frameStatus(task,timestamp){
     const result=handLandmarker.detectForVideo($('camera'),timestamp);rawPoints=result.landmarks?.[0]||[];
     if(rawPoints.length){
       found=true;const xs=rawPoints.map(p=>p.x),ys=rawPoints.map(p=>p.y);const span=Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys)),cx=(Math.max(...xs)+Math.min(...xs))/2,cy=(Math.max(...ys)+Math.min(...ys))/2;
-      if(cx<.16||cx>.84||cy<.12||cy>.9)guidance='Center your hand inside the guide.';
-      else if(span<(task.target==='finger' ? 0.24 : 0.2))guidance='Move your hand a little closer.';
-      else if(span>.88)guidance='Move your hand slightly farther away.';
+      if(cx<.16||cx>.84||cy<.12||cy>.9)guidance='Center your whole hand and wrist inside the guide.';
+      else if(span<(task.target==='finger' ? 0.24 : 0.2))guidance='Move closer so the camera can see your hand and wrist clearly.';
+      else if(span>.88)guidance='Move slightly farther back and keep your whole hand in frame.';
       else if(task.target==='finger'&&Math.hypot(rawPoints[16].x-rawPoints[14].x,rawPoints[16].y-rawPoints[14].y)<.045)guidance='Straighten and show your ring finger.';
       else{ready=true;guidance=task.target==='finger'?'Finger detected. Hold still.':task.target==='wrist'?'Wrist detected. Hold still.':'Hand detected. Hold still.';}
       landmarks=rawPoints.map(p=>({x:p.x,y:p.y,z:p.z}));
