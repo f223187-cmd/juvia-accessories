@@ -13,7 +13,7 @@ pip install -r requirements.txt
 uvicorn app:app --reload
 ```
 
-Open http://127.0.0.1:8000. Set `JUVIA_ADMIN_EMAIL` to the email of the account that will register as the initial administrator. Set `JUVIA_SECRET` to a long random value before deployment. Vercel can host the FastAPI app and static web UI, but its `/tmp` SQLite database and uploads are ephemeral; use Firestore and Cloud Storage before relying on persistent customer accounts or catalogue data.
+Open http://127.0.0.1:8000. Set `JUVIA_ADMIN_EMAIL` to the email of the initial administrator and `JUVIA_SECRET` to a long random value before deployment. Firebase Email/Password sign-in is enabled for project `juvia-b0ed2`; the API verifies Firebase ID tokens. The Firestore database exists in `asia-south1` with production-mode rules, but Juvia catalogue/review/history data still uses SQLite. Vercel's `/tmp` database and uploads are ephemeral, so do not rely on production data persistence until the Firestore data path is completed. Firebase Storage is not enabled because the project remains on Spark.
 
 ## Module endpoints
 
@@ -27,8 +27,10 @@ Open http://127.0.0.1:8000. Set `JUVIA_ADMIN_EMAIL` to the email of the account 
 - VTO: `GET /api/vto/status`; live MediaPipe inference runs in the phone browser
 - Analytics: `GET /api/analytics` (admin)
 
-The assistant uses a local product/review retrieval baseline with no external model requirement. VTO runs MediaPipe Tasks Vision in the mobile browser, avoiding server-side camera uploads. The guided capture flow asks for two wrist views for watches and bracelets, two hand/finger views for rings, and three automatically captured neck views for necklaces. Camera access requires HTTPS on phones. Captured photos remain in the browser session and are not uploaded; VTO currently does not render the accessory overlay. Models and the WASM runtime load from Google's model host and jsDelivr the first time the flow starts.
+The assistant currently uses keyword retrieval over published products; Firebase vector search is not configured. VTO runs MediaPipe Tasks Vision in the mobile browser, avoiding server-side camera uploads. The guided flow captures two wrist views for watches and bracelets, two hand/finger views for rings, and three neck views for necklaces. It supports front/rear camera switching. A published product's linked GLB/GLTF is rendered over its detected landmarks when available; otherwise the product image is used as a 2D preview. Landmark placement is an estimate and does not yet provide depth occlusion. Camera access requires HTTPS on phones. Captured photos remain in the browser session and are not uploaded. Models and the WASM runtime load from Google's model host and jsDelivr the first time the flow starts.
+
+The Firebase Web App is registered and the client uses Firebase Auth. Firestore is provisioned but Juvia's product and activity APIs have not migrated from SQLite, and client rules remain closed. Cloud Storage requires a Blaze billing upgrade, which has not been approved. Firebase rejected the Vercel hostname in Authorized Domains; the UI falls back to Juvia API auth for that specific error. Add a custom authorized domain for native Firebase sign-in. True 3D try-on requires a suitable GLB/GLTF asset for each product; the bundled watch demo is at `web/assets/models/juvia-watch.glb`.
 
 ## Try VTO on a phone
 
-Open https://juvia-accessories.vercel.app in your mobile browser, create an account, and tap **Virtual try-on**. Choose Watch, Bracelet, Ring, or Necklace and tap **Start guided capture**. Allow camera access and follow the pose prompt; detection pop-ups appear and photos are captured after the target stays in frame. Necklaces take three views automatically. The first start downloads the MediaPipe browser runtime and models; keep the page open while they load. Camera frames and captured photos stay on the device.
+For the current phone test, open https://juvia-accessories.vercel.app, sign in or register in Juvia, and tap **Virtual try-on**. The bundled **Watch VTO demo** is available without a product image. Allow camera access, use **Flip camera** to switch lenses, and follow the pose prompt. Production currently uses ephemeral SQLite for accounts/activity; Firestore sync is not yet implemented. Camera frames and captured photos stay on the device.

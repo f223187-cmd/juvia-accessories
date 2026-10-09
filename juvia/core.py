@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Optional
 from fastapi import HTTPException, Depends, Header
 from pydantic import BaseModel, Field
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2.id_token import verify_firebase_token
 ROOT=Path(__file__).resolve().parent.parent
 RUNTIME=Path('/tmp') if os.getenv('VERCEL') else ROOT
 DB=Path(os.getenv('JUVIA_DB_PATH',str(RUNTIME/'juvia.db')))
@@ -13,6 +15,8 @@ if not secret_value:
     if os.getenv('VERCEL'): raise RuntimeError('Set JUVIA_SECRET in Vercel project environment variables')
     secret_value='local-development-secret-change-before-deploy'
 SECRET=secret_value.encode()
+FIREBASE_PROJECT_ID=os.getenv('FIREBASE_PROJECT_ID','juvia-b0ed2')
+ADMIN_EMAIL=os.getenv('JUVIA_ADMIN_EMAIL','').strip().lower()
 CATEGORIES={'watches','bracelets','rings','necklaces'}
 def db():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); return c
@@ -23,6 +27,17 @@ def init():
         CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id), rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5), text TEXT NOT NULL, created TEXT NOT NULL, UNIQUE(product_id,user_id));
         CREATE TABLE IF NOT EXISTS interactions(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL, detail TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS assets(id INTEGER PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE SET NULL, filename TEXT NOT NULL, path TEXT NOT NULL, created TEXT NOT NULL);''')
+        if 'published' not in {r['name'] for r in c.execute('PRAGMA table_info(products)')}:
+            c.execute('ALTER TABLE products ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
+        bundled_model=ROOT/'web'/'assets'/'models'/'juvia-watch.glb'
+        if bundled_model.is_file():
+            product=c.execute('SELECT id FROM products WHERE source=?',('bundled-vto-watch',)).fetchone()
+            if not product:
+                cur=c.execute('INSERT INTO products(name,category,price,description,source,created,published) VALUES(?,?,?,?,?,?,1)',('Watch VTO demo','watches',0,'Bundled watch model for virtual try-on testing','bundled-vto-watch',datetime.now(timezone.utc).isoformat()))
+                product_id=cur.lastrowid
+            else: product_id=product['id']
+            if not c.execute('SELECT id FROM assets WHERE product_id=?',(product_id,)).fetchone():
+                c.execute('INSERT INTO assets(product_id,filename,path,created) VALUES(?,?,?,?)',(product_id,'juvia-watch.glb','bundled/juvia-watch.glb',datetime.now(timezone.utc).isoformat()))
 init()
 def now(): return datetime.now(timezone.utc).isoformat()
 def pw_hash(p,s=None):
@@ -32,10 +47,27 @@ def pw_ok(p,stored):
     except ValueError: return False
 def token(uid):
     payload=base64.urlsafe_b64encode(json.dumps({'uid':uid,'exp':int(time.time())+86400}).encode()).decode().rstrip('='); sig=hmac.new(SECRET,payload.encode(),hashlib.sha256).hexdigest(); return payload+'.'+sig
-def current(authorization:Optional[str]=Header(None)):
-    if not authorization or not authorization.lower().startswith('bearer '): raise HTTPException(401,'Sign in required')
+def firebase_current(token_value):
     try:
-        payload,sig=authorization.split()[1].split('.'); expected=hmac.new(SECRET,payload.encode(),hashlib.sha256).hexdigest()
+        claims=verify_firebase_token(token_value,GoogleRequest(),audience=FIREBASE_PROJECT_ID)
+        email=(claims.get('email') or '').strip().lower(); uid=claims.get('user_id') or claims.get('sub')
+        if not email or not uid: raise ValueError('Firebase account has no email')
+        name=claims.get('name') or email.split('@')[0]; role='admin' if ADMIN_EMAIL and email==ADMIN_EMAIL else 'customer'
+        with db() as c:
+            row=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
+            if row:
+                c.execute('UPDATE users SET name=?,role=? WHERE id=?',(name,role,row['id'])); user_id=row['id']
+            else:
+                cur=c.execute('INSERT INTO users(email,name,password,role,created) VALUES(?,?,?,?,?)',(email,name,pw_hash(secrets.token_urlsafe(32)),role,now())); user_id=cur.lastrowid
+            return dict(c.execute('SELECT id,email,name,role FROM users WHERE id=?',(user_id,)).fetchone())
+    except Exception: raise HTTPException(401,'Invalid or expired Firebase session')
+def current(authorization:Optional[str]=Header(None)):
+    parts=authorization.split() if authorization else []
+    if len(parts)!=2 or parts[0].lower()!='bearer': raise HTTPException(401,'Sign in required')
+    credential=parts[1]
+    if credential.count('.')==2: return firebase_current(credential)
+    try:
+        payload,sig=credential.split('.'); expected=hmac.new(SECRET,payload.encode(),hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig,expected): raise ValueError()
         d=json.loads(base64.urlsafe_b64decode(payload+'='*(-len(payload)%4)))
         if d['exp']<time.time(): raise ValueError()
@@ -49,9 +81,10 @@ def admin(u=Depends(current)):
 def log(u,kind,detail):
     with db() as c: c.execute('INSERT INTO interactions(user_id,kind,detail,created) VALUES(?,?,?,?)',(u['id'],kind,detail[:1000],now()))
 class Credentials(BaseModel): email:str; password:str=Field(min_length=8); name:str=''
-class ProductIn(BaseModel): name:str=Field(min_length=1,max_length=180); category:str; price:float=Field(ge=0); description:str=''; image:str=''; source:str=''
+class ProductIn(BaseModel): name:str=Field(min_length=1,max_length=180); category:str; price:float=Field(ge=0); description:str=''; image:str=''; source:str=''; published:bool=True
 class ReviewIn(BaseModel): rating:int=Field(ge=1,le=5); text:str=Field(min_length=1,max_length=2000)
 class ChatIn(BaseModel): message:str=Field(min_length=1,max_length=2000)
+class HistoryIn(BaseModel): kind:str=Field(min_length=1,max_length=40); detail:str=Field(min_length=1,max_length=1000)
 class ScrapeIn(BaseModel): urls:list[str]=Field(min_length=1,max_length=20); category:str
 def validate_category(cat):
     if cat not in CATEGORIES: raise HTTPException(422,'Category must be watches, bracelets, rings, or necklaces')
