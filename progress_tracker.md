@@ -2,13 +2,13 @@
 1. Customer and admin views use the existing role system; admin APIs remain role-protected.
 2. Product add/edit/delete and publish/unpublish controls are wired to the catalogue APIs.
 3. Scraped image-only products can be imported as unpublished zero-price test entries; pages without an actual product image are skipped. Admin can also upload JPG, PNG, and WebP product images.
-4. VTO supports front/rear camera switching, mirrored-coordinate correction, MediaPipe landmark tracking, and an image preview fallback.
-5. Published products can expose their linked self-contained GLB model to VTO; the model is positioned, scaled, and rotated from detected landmarks. The catalogue exposes the VTO action for image-free products with a linked GLB.
+4. VTO keeps MediaPipe tracking active after guided capture, smooths live accessory placement against wrist/hand/neck landmarks, requests a distinct palm-up wrist view, and uses a responsive portrait camera guide.
+5. Published products can expose their linked self-contained GLB model to VTO; the model is positioned, scaled, and rotated from detected landmarks. The catalogue exposes the VTO action for image-free products with a linked GLB. This remains landmark-based browser AR without body occlusion or per-device fit calibration.
 6. Firebase project has the `juvia-web` app registered; Email/Password auth is enabled and the Standard Firestore database was created in `asia-south1` with production-mode rules.
 7. Juvia's web client is configured for Firebase Auth; the API verifies Firebase ID tokens and maps roles using `JUVIA_ADMIN_EMAIL`. The approved admin email is set in Vercel Production.
 8. The user's watch GLB is bundled at `web/assets/models/juvia-watch.glb`; startup idempotently seeds a published, image-free `Watch VTO demo` product linked to it.
 9. Local checks passed for Python compilation, JavaScript syntax, Firebase identity mapping, mocked camera switching, image-only import, product image upload/fetch, published-only model lookup, and browser model loading/landmark placement.
-10. Commit `20fe95d` is deployed to Vercel Production at https://juvia-accessories.vercel.app. Live checks passed for the homepage, public watch catalogue (`has_3d_asset: 1`), updated catalogue script, and bundled GLB download; Vercel's Python 3.12 build completed.
+10. Latest production deployment is at https://juvia-accessories.vercel.app. Live checks passed for the homepage, public watch catalogue (`has_3d_asset: 1`), updated catalogue script, and bundled GLB download; Vercel's Python 3.12 build completed.
 
 ### Remaining Modules
 1. Product, review, history, and inventory data still use SQLite; Firestore sync and realtime updates are not implemented. Firestore is safely closed to client access until rules and the server data path are ready.

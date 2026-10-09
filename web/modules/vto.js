@@ -1,7 +1,8 @@
-let vtoTasks=[],vtoIndex=0,vtoStable=0,vtoLoop=false,vtoShots=[],vtoToastTimer=null;
+let vtoTasks=[],vtoIndex=0,vtoStable=0,vtoLoop=false,vtoCaptureComplete=false,vtoPoseReference=null,vtoShots=[],vtoToastTimer=null;
 let handLandmarker=null,faceLandmarker=null,vtoVisionPromise=null,vtoLastTimestamp=0,vtoLastDetected='';
-let vtoProducts=[],vtoSelected=null;
+let vtoProducts=[],vtoSelected=null,vtoOverlayState=null;
 let vtoFacingMode='user';
+let vtoRunId=0;
 const VTO_MODEL_BASE='https://storage.googleapis.com/mediapipe-models/';
 const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
 
@@ -17,10 +18,12 @@ function vtoPlan(category){
   ];
   const item=category==='watches'?'Watch':'Bracelet';
   return [
-    {target:'wrist',label:`Wrist — ${item.toLowerCase()} side`,hint:'Extend your arm with your palm facing down.'},
-    {target:'wrist',label:'Wrist — inner side',hint:'Turn your palm toward the camera and center your wrist.'}
+    {target:'wrist',pose:'outer',label:`Wrist — ${item.toLowerCase()} side`,hint:'Center your wrist and hold the back of your hand toward the camera.'},
+    {target:'wrist',pose:'inner',label:'Wrist — inner side',hint:'Rotate your forearm until your palm faces the camera.'}
   ];
 }
+function vtoGuideClass(task){return task.target==='neck'?'neck':task.target==='wrist'?'wrist':'hand';}
+function vtoTargetName(){return $('vtoProduct').value==='necklaces'?'neck':$('vtoProduct').value==='rings'?'ring finger':'wrist';}
 async function loadVtoModels(){
   if(vtoVisionPromise)return vtoVisionPromise;
   vtoVisionPromise=(async()=>{
@@ -39,7 +42,7 @@ async function loadVtoModels(){
   catch(e){vtoVisionPromise=null;throw e;}
 }
 function vtoToast(text){const el=$('vtoToast');el.textContent=text;el.classList.remove('hidden');clearTimeout(vtoToastTimer);vtoToastTimer=setTimeout(()=>el.classList.add('hidden'),2400);}
-function resetVto(){stopVto();vtoTasks=[];vtoIndex=0;vtoStable=0;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';$('vtoStep').textContent='Choose a product with an image to preview it on camera.';}
+function resetVto(){stopVto();vtoTasks=[];vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';$('vtoStep').textContent='Choose a product with an image or linked 3D model.';}
 async function loadVtoProducts(){
   const category=$('vtoProduct').value,select=$('vtoItem');
   try{
@@ -51,6 +54,7 @@ async function loadVtoProducts(){
 }
 async function setVtoItem(){
   const id=Number($('vtoItem').value);vtoSelected=vtoProducts.find(p=>p.id===id)||null;
+  vtoOverlayState=null;
   const overlay=$('vtoOverlay'),model=$('vtoModel');overlay.style.display='none';model.style.display='none';model.style.opacity='0';model.removeAttribute('src');model.dataset.ready='false';model.dataset.productId='';
   if(!vtoSelected){overlay.removeAttribute('src');$('vtoStep').textContent='Choose a product with an image or linked 3D model.';return;}
   if(vtoSelected.image)overlay.src=vtoSelected.image;
@@ -78,11 +82,12 @@ async function startVto(){
   if(!navigator.mediaDevices?.getUserMedia)return msg('Camera access requires HTTPS and a current mobile browser.');
   try{
     $('vtoStart').disabled=true;$('vtoStep').textContent='Starting camera and loading on-device hand and face models…';
+    const runId=++vtoRunId;vtoOverlayState=null;
     stream=await openVtoCamera(vtoFacingMode);
     await loadVtoModels();
-    vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';
-    $('vtoStart').classList.add('hidden');$('vtoSwitch').classList.remove('hidden');$('vtoStop').classList.remove('hidden');vtoLoop=true;
-    $('cameraGuide').className='camera-guide '+(vtoTasks[0].target==='neck'?'':'hand');await vtoScan();
+    vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';
+    $('vtoStart').classList.add('hidden');$('vtoRetake').classList.add('hidden');$('vtoSwitch').classList.remove('hidden');$('vtoStop').classList.remove('hidden');vtoLoop=true;
+    $('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0]);await vtoScan(runId);
   }catch(e){stopVto();msg('Could not start on-device detection: '+e.message);}
   finally{$('vtoStart').disabled=false;}
 }
@@ -135,16 +140,32 @@ function frameStatus(task,timestamp){
       else if(task.target==='finger'&&Math.hypot(rawPoints[16].x-rawPoints[14].x,rawPoints[16].y-rawPoints[14].y)<.045)guidance='Straighten and show your ring finger.';
       else{ready=true;guidance=task.target==='finger'?'Finger detected. Hold still.':task.target==='wrist'?'Wrist detected. Hold still.':'Hand detected. Hold still.';}
       landmarks=rawPoints.map(p=>({x:p.x,y:p.y,z:p.z}));
+      if(task.target==='wrist'&&rawPoints.length>17){
+        const points=result.worldLandmarks?.[0]?.length>17?result.worldLandmarks[0]:rawPoints;
+        const a={x:points[5].x-points[0].x,y:points[5].y-points[0].y,z:points[5].z-points[0].z};
+        const b={x:points[17].x-points[0].x,y:points[17].y-points[0].y,z:points[17].z-points[0].z};
+        const normal={x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x};
+        const magnitude=Math.hypot(normal.x,normal.y,normal.z)||1;
+        const palmNormal={x:normal.x/magnitude,y:normal.y/magnitude,z:normal.z/magnitude};
+        if(task.pose==='inner'&&vtoPoseReference){
+          const turn=palmNormal.x*vtoPoseReference.x+palmNormal.y*vtoPoseReference.y+palmNormal.z*vtoPoseReference.z;
+          if(turn>.5){ready=false;guidance='Rotate your forearm farther so your palm faces the camera.';}
+        }
+        if(!vtoCaptureComplete)landmarks.palmNormal=palmNormal;
+      }
     }
   }
   return {found,ready,guidance,landmarks};
 }
 function renderVtoOverlay(task,landmarks){
   const video=$('camera'),rect=video.getBoundingClientRect(),model=$('vtoModel'),useModel=model.dataset.productId===String(vtoSelected?.id)&&model.dataset.ready==='true',overlay=useModel?model:$('vtoOverlay');
-  if($('vtoProduct').value==='rings'&&task.target!=='finger'){$('vtoOverlay').style.display='none';model.style.opacity='0';model.style.display='block';return;}
-  if((!useModel&&(!vtoSelected?.image||!overlay.complete||!overlay.naturalWidth))||landmarks.length<2||!rect.width||!rect.height){overlay.style.display='none';return;}
+  if($('vtoProduct').value==='rings'&&task.target!=='finger'){$('vtoOverlay').style.display='none';model.style.opacity='0';model.style.display='none';return;}
+  if((!useModel&&(!vtoSelected?.image||!overlay.complete||!overlay.naturalWidth))||landmarks.length<2||!rect.width||!rect.height){overlay.style.display='none';vtoOverlayState=null;if(useModel){model.style.opacity='0';model.style.display='block';}return;}
+  const sourceWidth=video.videoWidth||rect.width,sourceHeight=video.videoHeight||rect.height,fit=getComputedStyle(video).objectFit;
+  const scale=fit==='cover'?Math.max(rect.width/sourceWidth,rect.height/sourceHeight):Math.min(rect.width/sourceWidth,rect.height/sourceHeight);
+  const contentWidth=sourceWidth*scale,contentHeight=sourceHeight*scale,offsetX=(rect.width-contentWidth)/2,offsetY=(rect.height-contentHeight)/2;
   let centerX,centerY,width,angle=0;
-  const displayPoint=p=>({x:(vtoFacingMode==='user'?1-p.x:p.x)*rect.width,y:p.y*rect.height});
+  const displayPoint=p=>({x:offsetX+(vtoFacingMode==='user'?1-p.x:p.x)*contentWidth,y:offsetY+p.y*contentHeight});
   if(task.target==='neck'){
     const chin=displayPoint(landmarks[0]),left=displayPoint(landmarks[1]),right=displayPoint(landmarks[2]);
     centerX=(left.x+right.x)/2;const span=Math.hypot(right.x-left.x,right.y-left.y);centerY=chin.y+span*.12;width=span*1.1;angle=Math.atan2(right.y-left.y,right.x-left.x)*180/Math.PI;
@@ -153,15 +174,28 @@ function renderVtoOverlay(task,landmarks){
     centerX=(proximal.x+middle.x)/2;centerY=(proximal.y+middle.y)/2;width=Math.max(24,Math.hypot(middle.x-proximal.x,middle.y-proximal.y)*2.4);angle=Math.atan2(middle.y-proximal.y,middle.x-proximal.x)*180/Math.PI+90;
   }else{
     const wrist=displayPoint(landmarks[0]),index=displayPoint(landmarks[5]||landmarks[9]),pinky=displayPoint(landmarks[17]);
-    centerX=wrist.x;centerY=wrist.y;width=Math.max(36,Math.hypot(index.x-pinky.x,index.y-pinky.y)*.62);angle=Math.atan2(index.y-pinky.y,index.x-pinky.x)*180/Math.PI;
-    if(task.target==='hand'){centerX=displayPoint(landmarks[9]).x;centerY=displayPoint(landmarks[9]).y;width*=1.2;}
+    const palm=displayPoint(landmarks[9]),forearmX=wrist.x-palm.x,forearmY=wrist.y-palm.y,forearmLength=Math.hypot(forearmX,forearmY)||1;
+    const palmWidth=Math.hypot(index.x-pinky.x,index.y-pinky.y);
+    centerX=wrist.x+forearmX/forearmLength*palmWidth*.14;centerY=wrist.y+forearmY/forearmLength*palmWidth*.14;
+    width=Math.max(52,palmWidth*1.25);angle=Math.atan2(forearmY,forearmX)*180/Math.PI-90;
+    if(task.target==='hand'){centerX=palm.x;centerY=palm.y;width*=1.2;}
   }
+  const target={x:centerX,y:centerY,width,angle,target:task.target,productId:vtoSelected?.id};
+  if(!vtoOverlayState||vtoOverlayState.target!==target.target||vtoOverlayState.productId!==target.productId)vtoOverlayState=target;
+  else{
+    const angleDelta=((target.angle-vtoOverlayState.angle+540)%360)-180,follow=.42;
+    vtoOverlayState.x+=(target.x-vtoOverlayState.x)*follow;vtoOverlayState.y+=(target.y-vtoOverlayState.y)*follow;vtoOverlayState.width+=(target.width-vtoOverlayState.width)*follow;vtoOverlayState.angle+=angleDelta*follow;
+  }
+  ({x:centerX,y:centerY,width,angle}=vtoOverlayState);
   overlay.style.width=`${width}px`;if(useModel){overlay.style.height=`${width}px`;overlay.style.opacity='1';}overlay.style.left=`${centerX}px`;overlay.style.top=`${centerY}px`;overlay.style.transform=`translate(-50%,-50%) rotate(${angle}deg)`;overlay.style.display='block';if(useModel)$('vtoOverlay').style.display='none';else{model.style.opacity='0';model.style.display='block';}
 }
-async function vtoScan(){
-  while(vtoLoop&&vtoIndex<vtoTasks.length){
-    const task=vtoTasks[vtoIndex],video=$('camera');
-    $('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${task.hint}`;
+async function vtoScan(runId){
+  while(vtoLoop&&runId===vtoRunId){
+    const capturing=vtoIndex<vtoTasks.length;
+    const liveTask=vtoTasks.find(task=>task.target==='finger')||vtoTasks.find(task=>task.target==='wrist')||vtoTasks[0];
+    const task=capturing?vtoTasks[vtoIndex]:liveTask,video=$('camera');
+    if(!task)break;
+    if(capturing)$('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${task.hint}`;
     if(video.readyState<2||!video.videoWidth){await new Promise(r=>setTimeout(r,150));continue;}
     const timestamp=Math.max(performance.now(),vtoLastTimestamp+1);vtoLastTimestamp=timestamp;
     let status;
@@ -170,21 +204,34 @@ async function vtoScan(){
     const detectionKey=status.found?task.target:'';
     if(detectionKey&&detectionKey!==vtoLastDetected)vtoToast(task.target==='neck'?'Neck detected':task.target==='finger'?'Finger detected':'Hand detected');
     vtoLastDetected=detectionKey;
-    $('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${status.guidance}`;
-    vtoStable=status.ready?vtoStable+1:0;
-    if(vtoStable>=3){
+    if(capturing){
+      $('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${status.guidance}`;
+      vtoStable=status.ready?vtoStable+1:0;
+    }else{
+      $('vtoStep').textContent=status.found?`Live try-on is tracking your ${vtoTargetName()}. Move naturally and the accessory will follow.`:`Live try-on is ready. Bring your ${vtoTargetName()} into the camera view.`;
+    }
+    if(capturing&&vtoStable>=3){
       const canvas=document.createElement('canvas'),scale=Math.min(1,640/video.videoWidth);canvas.width=Math.round(video.videoWidth*scale);canvas.height=Math.round(video.videoHeight*scale);
       const context=canvas.getContext('2d');if(vtoFacingMode==='user'){context.translate(canvas.width,0);context.scale(-1,1);}context.drawImage(video,0,0,canvas.width,canvas.height);
       const photo=canvas.toDataURL('image/jpeg',.86);vtoShots.push({photo,label:task.label,target:task.target,landmarks:status.landmarks});
+      if(task.target==='wrist'&&task.pose==='outer'&&status.landmarks.palmNormal)vtoPoseReference=status.landmarks.palmNormal;
       const card=document.createElement('div');card.className='shot';card.innerHTML=`<img alt="${esc(task.label)}" src="${photo}"><small>${esc(task.label)}</small>`;$('vtoShots').appendChild(card);
       vtoToast(task.target==='neck'?'Neck photo captured':task.target==='finger'?'Finger photo captured':'Hand photo captured');vtoIndex++;vtoStable=0;vtoLastDetected='';
-      if(vtoIndex<vtoTasks.length)$('cameraGuide').className='camera-guide '+(vtoTasks[vtoIndex].target==='neck'?'':'hand');
+      if(vtoIndex<vtoTasks.length)$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[vtoIndex]);
+      if(vtoIndex>=vtoTasks.length){
+        vtoCaptureComplete=true;$('vtoRetake').classList.remove('hidden');$('vtoStep').textContent=`Guided photos captured. Live tracking is active; move your ${vtoTargetName()} to see the accessory follow.`;vtoToast('Live try-on active');
+        api('/history',{method:'POST',body:{kind:'try_on',detail:`${vtoSelected.name}: ${vtoShots.length} guided photos`}}).catch(()=>{});
+      }
     }
-    await new Promise(r=>setTimeout(r,120));
+    await new Promise(r=>setTimeout(r,33));
   }
-  if(vtoLoop&&vtoIndex>=vtoTasks.length){vtoLoop=false;stopCameraStream();$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');$('vtoStep').textContent=`All ${vtoShots.length} guided photos captured. Review them above; retake by starting again.`;vtoToast('Capture complete');api('/history',{method:'POST',body:{kind:'try_on',detail:`${vtoSelected.name}: ${vtoShots.length} guided photos`}}).catch(()=>{});}
+}
+function retakeVto(){
+  if(!vtoLoop||!stream)return;
+  vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];$('vtoShots').innerHTML='';$('vtoRetake').classList.add('hidden');$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0]);
+  $('vtoStep').textContent='Retaking guided views. Follow the prompt and keep the target in the guide.';
 }
 function stopCameraStream(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}$('camera').srcObject=null;}
-function stopVto(){vtoLoop=false;stopCameraStream();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='block';$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');}
+function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;stopCameraStream();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');}
 async function startCamera(){return startVto();}
 async function capture(){return startVto();}
