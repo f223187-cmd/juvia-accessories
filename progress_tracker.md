@@ -1,4 +1,4 @@
-### Completed Locally
+### Ready and Tested
 1. Customer and admin views use the existing role system; admin APIs remain role-protected.
 2. Product add/edit/delete and publish/unpublish controls are wired to the catalogue APIs.
 3. Scraped image-only products can be imported as unpublished zero-price test entries; pages without an actual product image are skipped. Admin can also upload JPG, PNG, and WebP product images.
@@ -8,9 +8,9 @@
 7. Juvia's web client is configured for Firebase Auth; the API verifies Firebase ID tokens and maps roles using `JUVIA_ADMIN_EMAIL`. The approved admin email is set in Vercel Production.
 8. The user's watch GLB is bundled at `web/assets/models/juvia-watch.glb`; startup idempotently seeds a published, image-free `Watch VTO demo` product linked to it.
 9. Local checks passed for Python compilation, JavaScript syntax, Firebase identity mapping, mocked camera switching, image-only import, product image upload/fetch, published-only model lookup, and browser model loading/landmark placement.
-10. Latest changes are deployed to Vercel Production at https://juvia-accessories.vercel.app. Live smoke checks passed for the homepage, seeded watch product, linked asset endpoint, and bundled GLB download.
+10. Commit `20fe95d` is deployed to Vercel Production at https://juvia-accessories.vercel.app. Live checks passed for the homepage, public watch catalogue (`has_3d_asset: 1`), updated catalogue script, and bundled GLB download; Vercel's Python 3.12 build completed.
 
-### Blocked / Remaining
+### Remaining Modules
 1. Product, review, history, and inventory data still use SQLite; Firestore sync and realtime updates are not implemented. Firestore is safely closed to client access until rules and the server data path are ready.
 2. Cloud Storage requires Blaze billing; the user chose to remain on Spark, so Storage is not enabled. Uploaded files on Vercel would remain ephemeral.
 3. Firebase Auth rejected `juvia-accessories.vercel.app` in the Authorized Domains form. The UI falls back to Juvia API auth on Firebase's `auth/unauthorized-domain`; a custom authorized domain is needed for native Firebase login.
