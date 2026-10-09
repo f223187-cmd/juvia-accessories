@@ -9,6 +9,7 @@
 8. The user's watch GLB is bundled at `web/assets/models/juvia-watch.glb`; startup idempotently seeds a published, image-free `Watch VTO demo` product linked to it.
 9. Local checks passed for Python compilation, JavaScript syntax, Firebase identity mapping, mocked camera switching, image-only import, product image upload/fetch, published-only model lookup, and browser model loading/landmark placement.
 10. Latest production deployment is at https://juvia-accessories.vercel.app. Live checks passed for the homepage, public watch catalogue (`has_3d_asset: 1`), updated catalogue script, and bundled GLB download; Vercel's Python 3.12 build completed.
+11. Mobile-size Chrome VTO check passed with the real MediaPipe hand/face models and bundled watch GLB: the fixture hand was detected, the first wrist view captured automatically, an invalid pose showed red guidance, and a valid wrist pose showed green with the watch placed on the wrist. Camera permission waiting is cancellable and delayed model loading reports a retry path. Physical phone-camera behavior still needs device verification.
 
 ### Remaining Modules
 1. Product, review, history, and inventory data still use SQLite; Firestore sync and realtime updates are not implemented. Firestore is safely closed to client access until rules and the server data path are ready.

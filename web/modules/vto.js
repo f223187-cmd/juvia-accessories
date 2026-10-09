@@ -3,6 +3,7 @@ let handLandmarker=null,faceLandmarker=null,vtoVisionPromise=null,vtoLastTimesta
 let vtoProducts=[],vtoSelected=null,vtoOverlayState=null;
 let vtoFacingMode='user';
 let vtoRunId=0;
+let vtoFrameWaitSince=0;
 const VTO_MODEL_BASE='https://storage.googleapis.com/mediapipe-models/';
 const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
 
@@ -24,6 +25,7 @@ function vtoPlan(category){
 }
 function vtoGuideClass(task){return task.target==='neck'?'neck':task.target==='wrist'?'wrist':'hand';}
 function vtoTargetName(){return $('vtoProduct').value==='necklaces'?'neck':$('vtoProduct').value==='rings'?'ring finger':'wrist';}
+function setVtoGuideValidity(valid){const guide=$('cameraGuide');guide.classList.toggle('is-valid',!!valid);guide.classList.toggle('is-invalid',!valid);guide.dataset.poseState=valid?'valid':'invalid';}
 async function loadVtoModels(){
   if(vtoVisionPromise)return vtoVisionPromise;
   vtoVisionPromise=(async()=>{
@@ -40,6 +42,12 @@ async function loadVtoModels(){
   })();
   try{const models=await vtoVisionPromise;handLandmarker=models.hand;faceLandmarker=models.face;return models;}
   catch(e){vtoVisionPromise=null;throw e;}
+}
+async function loadVtoModelsWithTimeout(){
+  let timer;
+  try{return await Promise.race([loadVtoModels(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Hand and face models did not load within 45 seconds. Check your connection and tap Start live try-on to retry.')),45000);})]);}
+  catch(e){if(e.message.includes('45 seconds'))vtoVisionPromise=null;throw e;}
+  finally{clearTimeout(timer);}
 }
 function vtoToast(text){const el=$('vtoToast');el.textContent=text;el.classList.remove('hidden');clearTimeout(vtoToastTimer);vtoToastTimer=setTimeout(()=>el.classList.add('hidden'),2400);}
 function resetVto(){stopVto();vtoTasks=[];vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';$('vtoStep').textContent='Choose a product with an image or linked 3D model.';}
@@ -77,19 +85,30 @@ async function hasVtoPreview(product){
   try{await api('/products/'+product.id+'/asset');return true;}catch{return false;}
 }
 async function startVto(){
-  if(!vtoProducts.length)await loadVtoProducts();
-  if(!await hasVtoPreview(vtoSelected))return msg('Choose a product with an image or upload a linked GLB model first.');
-  if(!navigator.mediaDevices?.getUserMedia)return msg('Camera access requires HTTPS and a current mobile browser.');
+  const runId=++vtoRunId;
+  let permissionTimer;
   try{
-    $('vtoStart').disabled=true;$('vtoStep').textContent='Starting camera and loading on-device hand and face models…';
-    const runId=++vtoRunId;vtoOverlayState=null;
-    stream=await openVtoCamera(vtoFacingMode);
-    await loadVtoModels();
+    $('vtoStart').disabled=true;$('vtoStart').classList.add('hidden');$('vtoStop').classList.remove('hidden');$('vtoStep').textContent='Checking the selected product and preparing your camera…';
+    vtoLoop=false;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();setVtoGuideValidity(false);
+    if(!vtoProducts.length)await loadVtoProducts();
+    if(runId!==vtoRunId)return;
+    if(!await hasVtoPreview(vtoSelected))throw new Error('Choose a product with an image or linked GLB model first.');
+    if(runId!==vtoRunId)return;
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error('Camera access requires HTTPS and a current mobile browser.');
+    vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0])+' is-invalid';
+    $('vtoStep').textContent='Allow camera access when your browser asks. Your camera preview will appear here.';
+    permissionTimer=setTimeout(()=>{if(runId===vtoRunId&&!stream)$('vtoStep').textContent='Still waiting for camera permission. Choose Allow in your browser, or tap Stop camera to cancel.';},8000);
+    const openedStream=await openVtoCamera(vtoFacingMode);
+    clearTimeout(permissionTimer);permissionTimer=null;
+    if(runId!==vtoRunId){openedStream.getTracks().forEach(track=>track.stop());if($('camera').srcObject===openedStream)$('camera').srcObject=null;return;}
+    stream=openedStream;$('vtoSwitch').classList.remove('hidden');$('vtoStep').textContent='Camera is on. Loading the hand and face models on this device; first start may take a little while.';
+    await loadVtoModelsWithTimeout();
+    if(runId!==vtoRunId)return;
     vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];vtoLastDetected='';$('vtoShots').innerHTML='';
-    $('vtoStart').classList.add('hidden');$('vtoRetake').classList.add('hidden');$('vtoSwitch').classList.remove('hidden');$('vtoStop').classList.remove('hidden');vtoLoop=true;
-    $('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0]);await vtoScan(runId);
-  }catch(e){stopVto();msg('Could not start on-device detection: '+e.message);}
-  finally{$('vtoStart').disabled=false;}
+    $('vtoRetake').classList.add('hidden');vtoLoop=true;
+    $('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0])+' is-invalid';await vtoScan(runId);
+  }catch(e){if(runId===vtoRunId){stopVto();$('vtoStep').textContent='Try-on could not start: '+e.message;msg(e.message);}}
+  finally{clearTimeout(permissionTimer);if(runId===vtoRunId)$('vtoStart').disabled=false;}
 }
 async function openVtoCamera(mode,exact=false){
   const facingMode=exact?{exact:mode}:{ideal:mode};
@@ -102,7 +121,7 @@ async function openVtoCamera(mode,exact=false){
 async function switchVtoCamera(){
   if(!vtoLoop||!stream)return;
   const previous=vtoFacingMode,next=previous==='user'?'environment':'user',button=$('vtoSwitch');
-  button.disabled=true;vtoStable=0;$('vtoStep').textContent='Switching camera…';stopCameraStream();
+  button.disabled=true;vtoStable=0;vtoFrameWaitSince=0;setVtoGuideValidity(false);$('vtoStep').textContent='Switching camera…';stopCameraStream();
   try{stream=await openVtoCamera(next,true);vtoLastTimestamp=0;vtoToast(next==='user'?'Front camera':'Back camera');}
   catch(e){
     try{stream=await openVtoCamera(previous);$('vtoStep').textContent='That camera is unavailable; continuing with the previous camera.';}
@@ -196,10 +215,16 @@ async function vtoScan(runId){
     const task=capturing?vtoTasks[vtoIndex]:liveTask,video=$('camera');
     if(!task)break;
     if(capturing)$('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${task.hint}`;
-    if(video.readyState<2||!video.videoWidth){await new Promise(r=>setTimeout(r,150));continue;}
+    if(video.readyState<2||!video.videoWidth){
+      if(!vtoFrameWaitSince){vtoFrameWaitSince=performance.now();$('vtoStep').textContent='Waiting for a live camera preview. Keep Juvia open while the camera starts.';}
+      else if(performance.now()-vtoFrameWaitSince>12000){stopVto();$('vtoStep').textContent='The camera opened but sent no video frames. Check site camera permission, then tap Start live try-on again.';return;}
+      await new Promise(r=>setTimeout(r,150));continue;
+    }
+    vtoFrameWaitSince=0;
     const timestamp=Math.max(performance.now(),vtoLastTimestamp+1);vtoLastTimestamp=timestamp;
     let status;
     try{status=frameStatus(task,timestamp);}catch(e){stopVto();msg('Camera detection stopped: '+e.message);return;}
+    setVtoGuideValidity(status.ready);
     renderVtoOverlay(task,status.landmarks);
     const detectionKey=status.found?task.target:'';
     if(detectionKey&&detectionKey!==vtoLastDetected)vtoToast(task.target==='neck'?'Neck detected':task.target==='finger'?'Finger detected':'Hand detected');
@@ -208,7 +233,7 @@ async function vtoScan(runId){
       $('vtoStep').textContent=`Photo ${vtoIndex+1} of ${vtoTasks.length}: ${task.label}. ${status.guidance}`;
       vtoStable=status.ready?vtoStable+1:0;
     }else{
-      $('vtoStep').textContent=status.found?`Live try-on is tracking your ${vtoTargetName()}. Move naturally and the accessory will follow.`:`Live try-on is ready. Bring your ${vtoTargetName()} into the camera view.`;
+      $('vtoStep').textContent=status.ready?`Live try-on is tracking your ${vtoTargetName()}. Move naturally and the accessory will follow.`:status.guidance;
     }
     if(capturing&&vtoStable>=3){
       const canvas=document.createElement('canvas'),scale=Math.min(1,640/video.videoWidth);canvas.width=Math.round(video.videoWidth*scale);canvas.height=Math.round(video.videoHeight*scale);
@@ -217,7 +242,7 @@ async function vtoScan(runId){
       if(task.target==='wrist'&&task.pose==='outer'&&status.landmarks.palmNormal)vtoPoseReference=status.landmarks.palmNormal;
       const card=document.createElement('div');card.className='shot';card.innerHTML=`<img alt="${esc(task.label)}" src="${photo}"><small>${esc(task.label)}</small>`;$('vtoShots').appendChild(card);
       vtoToast(task.target==='neck'?'Neck photo captured':task.target==='finger'?'Finger photo captured':'Hand photo captured');vtoIndex++;vtoStable=0;vtoLastDetected='';
-      if(vtoIndex<vtoTasks.length)$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[vtoIndex]);
+      if(vtoIndex<vtoTasks.length){$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[vtoIndex])+' is-invalid';setVtoGuideValidity(false);}
       if(vtoIndex>=vtoTasks.length){
         vtoCaptureComplete=true;$('vtoRetake').classList.remove('hidden');$('vtoStep').textContent=`Guided photos captured. Live tracking is active; move your ${vtoTargetName()} to see the accessory follow.`;vtoToast('Live try-on active');
         api('/history',{method:'POST',body:{kind:'try_on',detail:`${vtoSelected.name}: ${vtoShots.length} guided photos`}}).catch(()=>{});
@@ -228,10 +253,10 @@ async function vtoScan(runId){
 }
 function retakeVto(){
   if(!vtoLoop||!stream)return;
-  vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];$('vtoShots').innerHTML='';$('vtoRetake').classList.add('hidden');$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0]);
+  vtoTasks=vtoPlan($('vtoProduct').value);vtoIndex=0;vtoStable=0;vtoCaptureComplete=false;vtoPoseReference=null;vtoShots=[];$('vtoShots').innerHTML='';$('vtoRetake').classList.add('hidden');$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0])+' is-invalid';setVtoGuideValidity(false);
   $('vtoStep').textContent='Retaking guided views. Follow the prompt and keep the target in the guide.';
 }
 function stopCameraStream(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}$('camera').srcObject=null;}
-function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;stopCameraStream();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');}
+function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');$('vtoStart').disabled=false;setVtoGuideValidity(false);}
 async function startCamera(){return startVto();}
 async function capture(){return startVto();}
