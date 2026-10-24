@@ -97,10 +97,10 @@ export function wristSize(frame,tapeInches,measuredWidth){
   let width;
   if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/2.67; // ellipse w × 0.72w ≈ 2.67w perimeter
   else{
-    const fromPalm=Math.min(.07,Math.max(.048,frame.palmWidth*.9));
-    // Skin edges are lost in shadow more often than they overshoot, so a measurement may only widen
-    // the strap; a strap narrower than the arm would sink into it.
-    width=Number.isFinite(measuredWidth)?clamp(measuredWidth,fromPalm,Math.min(.078,fromPalm*1.3)):fromPalm;
+    const fromPalm=Math.min(.07,Math.max(.042,frame.palmWidth*.9));
+    // The measured silhouette is the best size signal, but skin edges get lost in shadow more often than
+    // they overshoot, so it may shrink the palm-based estimate only a little and widen it more.
+    width=Number.isFinite(measuredWidth)?clamp(measuredWidth,Math.max(.04,fromPalm*.86),Math.min(.078,fromPalm*1.3)):fromPalm;
   }
   return {width,thickness:width*.72};
 }
@@ -161,7 +161,7 @@ export function detectForearm(pix,w,h,image,offsetFraction=.32){
   let best=-1,bestPhi=base;
   for(let a=-100;a<=100;a+=5){const phi=base+a*Math.PI/180,s=scoreDir(phi);if(s>best){best=s;bestPhi=phi;}}
   for(let a=-4;a<=4;a+=1){const phi=bestPhi+a*Math.PI/180,s=scoreDir(phi);if(s>best+1e-9){best=s;bestPhi=phi;}}
-  if(best<.62)return null;
+  if(best<.56)return null;
   const d={x:Math.cos(bestPhi),y:Math.sin(bestPhi)},p={x:-d.y,y:d.x};
   // Cross-sections around the watch position: walk out from the axis to the first non-skin run.
   const widths=[],centres=[];
@@ -237,6 +237,45 @@ export function solveWristPose({image,world,width,height,right,handedness,forear
     // > 0 when the back of the wrist (watch dial) faces the camera.
     dialFacing:-Z.z,
     forearm:toElbow?{x:X.x,y:X.y}:{x:-X.x,y:-X.y}};
+}
+
+// Ring on the ring finger's proximal phalanx (landmarks 13 → 14).
+// Ring model frame: +X along the finger toward the tip, +Z out of the back of the finger (stone side).
+export function solveFingerPose({image,world,width,height,right,handedness,tapeInches}){
+  const cam=fitCamera(image,world,width,height);if(!cam)return null;
+  if(typeof right!=='boolean')right=chiralityEvidence(world,handedness)>=0;
+  const f=wristFrame(world,right);if(!f)return null;
+  const mcp=world[13],pip=world[14],Xw=norm(sub(pip,mcp));if(!Xw)return null;
+  const Zw=norm(sub(f.Z,mul(Xw,dot(f.Z,Xw))));if(!Zw)return null;
+  // Ring size: a soft-tape circumference wins; otherwise ring fingers are ~27% of the knuckle span.
+  const diameter=Number.isFinite(tapeInches)&&tapeInches>1.2&&tapeInches<3.8?tapeInches*.0254/Math.PI:clamp(f.palmWidth*.27,.0155,.0215);
+  const centre=add(mcp,mul(sub(pip,mcp),.36)),p=cam.project(centre);
+  const X=cam.toCamera(Xw),Z=cam.toCamera(Zw),Y=cross(Z,X);
+  // Neighbouring proximal phalanges hide the ring's sides when fingers are together.
+  const local=q=>cam.toCamera(sub(q,centre)),capsule=(a,b,r)=>({a:local(world[a]),b:local(world[b]),r});
+  const occluders=[capsule(13,14,diameter/2),capsule(9,10,diameter*.53),capsule(17,18,diameter*.46),capsule(0,13,diameter*.62)];
+  return {x:p.x,y:p.y,scale:cam.scale,axes:{X,Y,Z},size:{diameter},occluders,anatomicalRight:right,dialFacing:-Z.z};
+}
+
+// Necklace from MediaPipe Pose shoulders (11, 12) and the Face Landmarker chin (152).
+// Necklace model frame: +X across the body, +Y up, +Z out of the chest; origin = neck centre at collar height.
+export function solveNeckPose({shoulders,shouldersWorld,chin,width,height}){
+  if(!shoulders?.[0]||!shoulders?.[1]||!chin)return null;
+  const L={x:shoulders[0].x*width,y:shoulders[0].y*height},R={x:shoulders[1].x*width,y:shoulders[1].y*height},C={x:chin.x*width,y:chin.y*height};
+  const px=Math.hypot(L.x-R.x,L.y-R.y);if(px<20)return null;
+  let metric=.36,depth=0;
+  if(shouldersWorld?.[0]&&shouldersWorld?.[1]){
+    const a=shouldersWorld[0],b=shouldersWorld[1];metric=clamp(len(sub(a,b)),.28,.46);depth=(a.z-b.z)/metric;
+  }
+  const scale=px/metric,mid={x:(L.x+R.x)/2,y:(L.y+R.y)/2};
+  // Body axes in camera space (y down, z into the scene). Body yaw comes from the shoulders' depth difference.
+  let X=norm({x:(L.x-R.x)/px,y:(L.y-R.y)/px,z:clamp(depth,-.9,.9)});
+  const up2=norm({x:C.x-mid.x,y:C.y-mid.y,z:0})||{x:0,y:-1,z:0};
+  let Y=norm(sub(up2,mul(X,dot(up2,X))));if(!X||!Y)return null;
+  let Z=cross(X,Y);if(Z.z>0){X=mul(X,-1);Z=cross(X,Y);}
+  // The chain sits around the base of the neck, about a third of the way from the shoulder line to the chin.
+  const t=.3,x=mid.x+(C.x-mid.x)*t,y=mid.y+(C.y-mid.y)*t;
+  return {x,y,scale,axes:{X,Y,Z},size:{neck:.115},dialFacing:-Z.z};
 }
 
 export class OneEuro{

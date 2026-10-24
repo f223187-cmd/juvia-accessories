@@ -1,4 +1,4 @@
-﻿import os, re, json, time, hmac, hashlib, sqlite3, secrets, base64
+import os, re, json, time, hmac, hashlib, sqlite3, secrets, base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -29,15 +29,26 @@ def init():
         CREATE TABLE IF NOT EXISTS assets(id INTEGER PRIMARY KEY, product_id INTEGER REFERENCES products(id) ON DELETE SET NULL, filename TEXT NOT NULL, path TEXT NOT NULL, created TEXT NOT NULL);''')
         if 'published' not in {r['name'] for r in c.execute('PRAGMA table_info(products)')}:
             c.execute('ALTER TABLE products ADD COLUMN published INTEGER NOT NULL DEFAULT 1')
-        bundled_model=ROOT/'web'/'assets'/'models'/'juvia-watch.glb'
-        if bundled_model.is_file():
-            product=c.execute('SELECT id FROM products WHERE source=?',('bundled-vto-watch',)).fetchone()
-            if not product:
-                cur=c.execute('INSERT INTO products(name,category,price,description,source,created,published) VALUES(?,?,?,?,?,?,1)',('Watch VTO demo','watches',0,'Bundled watch model for virtual try-on testing','bundled-vto-watch',datetime.now(timezone.utc).isoformat()))
-                product_id=cur.lastrowid
-            else: product_id=product['id']
-            if not c.execute('SELECT id FROM assets WHERE product_id=?',(product_id,)).fetchone():
-                c.execute('INSERT INTO assets(product_id,filename,path,created) VALUES(?,?,?,?)',(product_id,'juvia-watch.glb','bundled/juvia-watch.glb',datetime.now(timezone.utc).isoformat()))
+        seed_demo_products(c)
+DEMO_PRODUCTS=[
+    # (source key, model file, name, category, price, description, legacy name)
+    ('bundled-vto-watch','juvia-watch.glb','Heritage Moonphase Watch','watches',249,'Polished steel case, midnight dial with moonphase sub-dial and a cognac leather strap. 42 mm, made for everyday wear.','Watch VTO demo'),
+    ('bundled-vto-bracelet','juvia-bracelet.glb','Rosé Cable Bangle','bracelets',129,'Twisted rose-gold cable bangle with a softly oval profile that sits comfortably on the wrist bone.',None),
+    ('bundled-vto-ring','juvia-ring.glb','Aurora Solitaire Ring','rings',189,'Four-prong solitaire in polished yellow gold with a brilliant-cut 6 mm stone on a slim comfort-fit band.',None),
+    ('bundled-vto-necklace','juvia-necklace.glb','Emerald Drop Necklace','necklaces',159,'Fine gold chain with a faceted emerald drop that rests just below the collarbone.',None),
+]
+def seed_demo_products(c):
+    for source,model,name,category,price,description,legacy in DEMO_PRODUCTS:
+        if not (ROOT/'web'/'assets'/'models'/model).is_file(): continue
+        product=c.execute('SELECT id,name FROM products WHERE source=?',(source,)).fetchone()
+        if not product:
+            cur=c.execute('INSERT INTO products(name,category,price,description,source,created,published) VALUES(?,?,?,?,?,?,1)',(name,category,price,description,source,datetime.now(timezone.utc).isoformat()))
+            product_id=cur.lastrowid
+        else:
+            product_id=product['id']
+            if legacy and product['name']==legacy: c.execute('UPDATE products SET name=?,price=?,description=? WHERE id=?',(name,price,description,product_id))
+        if not c.execute('SELECT id FROM assets WHERE product_id=?',(product_id,)).fetchone():
+            c.execute('INSERT INTO assets(product_id,filename,path,created) VALUES(?,?,?,?)',(product_id,model,'bundled/'+model,datetime.now(timezone.utc).isoformat()))
 init()
 def now(): return datetime.now(timezone.utc).isoformat()
 def pw_hash(p,s=None):
@@ -75,6 +86,10 @@ def current(authorization:Optional[str]=Header(None)):
         if not u: raise ValueError()
         return dict(u)
     except Exception: raise HTTPException(401,'Invalid or expired session')
+def optional_current(authorization:Optional[str]=Header(None)):
+    if not authorization: return None
+    try: return current(authorization)
+    except HTTPException: return None
 def admin(u=Depends(current)):
     if u['role']!='admin': raise HTTPException(403,'Administrator access required')
     return u

@@ -1,413 +1,370 @@
-let vtoTasks=[],vtoStable=0,vtoLoop=false,vtoCapturePaused=false,vtoLiveReady=false,vtoShots=[],vtoToastTimer=null;
-let vtoLastViewSignature=null,vtoLastViewCapture=0,vtoMeasurements={},vtoOcclusionLastDraw=0;
-let handLandmarker=null,faceLandmarker=null,poseLandmarker=null,vtoVisionPromise=null,vtoVisionCategory='',vtoLastTimestamp=0,vtoLastDetected='';
-let vtoProducts=[],vtoSelected=null,vtoOverlayState=null;
-let vtoFacingMode='user';
-let vtoRunId=0;
-let vtoFrameWaitSince=0;
-let wristAR=null,wristARPromise=null,vtoHandedness='';
-function vtoIsWristCategory(category=$('vtoProduct').value){return category==='watches'||category==='bracelets';}
-async function getWristAR(){
-  if(wristAR)return wristAR;
-  if(!wristARPromise)wristARPromise=import('/modules/vto3d.js?v=3').then(mod=>{wristAR=new mod.WristAR($('vtoCanvas'));return wristAR;}).catch(e=>{wristARPromise=null;throw e;});
-  return wristARPromise;
-}
-function vtoModelReady(){return vtoIsWristCategory()?!!(wristAR?.ready&&wristAR.url&&vtoSelected&&wristAR.productId===vtoSelected.id):$('vtoModel').dataset.productId===String(vtoSelected?.id)&&$('vtoModel').dataset.ready==='true';}
-function vtoModelError(){return vtoIsWristCategory()?(wristAR?.state==='error'&&wristAR.productId===vtoSelected?.id?wristAR.error||'load':''):$('vtoModel').dataset.error;}
-function hideWristAR(){if(wristAR)wristAR.hide();const c=$('vtoCanvas');if(c)c.style.visibility='hidden';}
-function placeVtoCanvas(){
-  const video=$('camera'),canvas=$('vtoCanvas'),rect=video.getBoundingClientRect(),wrap=video.parentElement.getBoundingClientRect();
-  const vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh||!rect.width||!rect.height)return false;
-  const fit=getComputedStyle(video).objectFit,scale=fit==='cover'?Math.max(rect.width/vw,rect.height/vh):Math.min(rect.width/vw,rect.height/vh);
-  const w=vw*scale,h=vh*scale,left=rect.left-wrap.left+(rect.width-w)/2,top=rect.top-wrap.top+(rect.height-h)/2;
-  Object.assign(canvas.style,{left:left+'px',top:top+'px',width:w+'px',height:h+'px',transform:vtoFacingMode==='user'?'scaleX(-1)':'none',visibility:'visible'});
-  wristAR.resize(w,h,vw,vh);return true;
-}
-const VTO_MODEL_BASE='https://storage.googleapis.com/mediapipe-models/';
-const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
+// Juvia live try-on: MediaPipe tracking runs on this device; vto3d.js renders the product's 3D model on top.
+const VTO_TARGET = { watches: 'wrist', bracelets: 'wrist', rings: 'finger', necklaces: 'neck' };
+const VTO_COPY = {
+  wrist: {
+    text: 'Your camera finds your wrist and the piece follows every move, in real 3D.',
+    tips: ['Hold your forearm across the frame, back of the wrist toward the camera', 'Keep your hand and lower forearm in view', 'Bright, even light makes metal look real'],
+    search: 'Show your wrist and hand', size: 'Wrist circumference (inches)', sizeHelp: 'Wrap a soft tape around your wrist just below the bone and enter the reading.', range: [4, 10],
+  },
+  finger: {
+    text: 'Your camera finds your ring finger and the ring stays on as you move.',
+    tips: ['Hold your hand up with fingers slightly apart', 'Keep the ring finger and knuckles in view', 'Turn your hand slowly to see the stone from every side'],
+    search: 'Show your hand with fingers apart', size: 'Ring finger circumference (inches)', sizeHelp: 'Wrap a strip of paper around the base of your ring finger, mark where it meets, and measure it.', range: [1.5, 3.6],
+  },
+  neck: {
+    text: 'Face the camera and the necklace settles on your collarbone.',
+    tips: ['Use the front camera at arm’s length', 'Keep your chin, neck and both shoulders in view', 'Move hair away from your neck'],
+    search: 'Face the camera, shoulders in view', size: 'Neck circumference (inches)', sizeHelp: 'Measure around the base of your neck with a soft tape.', range: [10, 22],
+  },
+};
+const VTO_MODEL_BASE = 'https://storage.googleapis.com/mediapipe-models/';
+const VTO_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
+let vtoCategory = 'watches', vtoProducts = [], vtoSelected = null, vtoLoop = false, vtoRunId = 0, vtoStable = 0, vtoLocked = false;
+let vtoFacingMode = 'user', vtoHandedness = '', vtoLastTs = 0, vtoStatusText = '', vtoLoggedRun = -1, vtoWatchdog = null;
+let vtoShots = [], vtoLastSig = null, vtoLastShotAt = 0, vtoAutoCapture = true, vtoAutoCount = 0, vtoMeasurements = {};
+let handLandmarker = null, faceLandmarker = null, poseLandmarker = null, vtoVisionPromise = null, vtoVisionKey = '', vtoFaceCache = null, vtoFrameNo = 0;
+let accessoryAR = null, accessoryARPromise = null, vtoKindFor = null, vtoPendingId = null;
+const vtoTarget = () => VTO_TARGET[vtoCategory] || 'wrist';
+const isTouch = () => matchMedia('(pointer:coarse)').matches;
 
-function vtoPlan(category){
-  if(category==='necklaces')return [{target:'neck',label:'Neck and collar area',hint:'Frame your jaw, neck, and both shoulders. Keep hair away from your neck, then turn slowly; Juvia saves each clear new angle.'}];
-  if(category==='rings')return [{target:'finger',label:'Ring finger',hint:'Bring the ring finger close and keep its base, joints, and tip visible. Move slowly to show a few angles; Juvia saves clear new views.'}];
-  const item=category==='watches'?'watch':'bracelet';
-  return [{target:'wrist',label:'Wrist and lower forearm',hint:`Place your wrist, lower forearm, and hand in the guide; keep your face outside it. Tracking starts as soon as the wrist is steady. Slowly roll your wrist to save clear ${item} views.`}];
+// ---------- Product selection ----------
+function renderVtoCats() {
+  $('vtoCats').innerHTML = Object.entries(CATEGORY).map(([k, c]) =>
+    `<button class="${k === vtoCategory ? 'active' : ''}" role="tab" aria-selected="${k === vtoCategory}" onclick="setVtoCategory('${k}')">${icon(c.icon)}${c.label}</button>`).join('');
 }
-function vtoGuideClass(task){return task.target==='neck'?'neck':task.target==='wrist'?'wrist':'hand';}
-function vtoProductKind(){return $('vtoProduct').value==='necklaces'?'neck':$('vtoProduct').value==='rings'?'finger':'wrist';}
-function vtoTargetName(){return $('vtoProduct').value==='necklaces'?'neck':$('vtoProduct').value==='rings'?'ring finger':'wrist';}
-function vtoTargetLabel(){return $('vtoProduct').value==='necklaces'?'Neck':$('vtoProduct').value==='rings'?'Ring finger':'Wrist';}
-function vtoMeasurementLabel(){return $('vtoProduct').value==='necklaces'?'Neck circumference':$('vtoProduct').value==='rings'?'Ring finger circumference':'Wrist circumference';}
-function setVtoGuideValidity(valid){const guide=$('cameraGuide');guide.classList.toggle('is-valid',!!valid);guide.classList.toggle('is-invalid',!valid);guide.dataset.poseState=valid?'valid':'invalid';}
-function updateVtoMeasurement(){
-  const category=$('vtoProduct').value,label=vtoMeasurementLabel();
-  $('vtoMeasureLabel').textContent=label+' (inches, soft-tape reading)';
-  $('vtoMeasurement').value=vtoMeasurements[category]??'';
-  $('vtoMeasurementResult').textContent=vtoMeasurements[category]==null?'No tape reading saved for this session.':'Your '+label.toLowerCase()+' tape reading: '+vtoMeasurements[category]+' in.';
+function vtoThumb(p) { return p.image ? `<img src="${esc(p.image)}" alt="">` : icon(CATEGORY[p.category]?.icon || 'cube'); }
+function renderVtoProducts() {
+  const empty = `<p class="fine" style="margin:4px 2px">No ${CATEGORY[vtoCategory].label.toLowerCase()} with a 3D model yet.</p>`;
+  $('vtoList').innerHTML = vtoProducts.map(p => `<button class="prow ${p.id === vtoSelected?.id ? 'active' : ''}" onclick="selectVtoProduct(${p.id})"><span class="thumb">${vtoThumb(p)}</span><span><b>${esc(p.name)}</b><small>${money(p.price)}</small></span></button>`).join('') || empty;
+  $('vtoCarousel').innerHTML = Object.entries(CATEGORY).filter(([k]) => k !== vtoCategory).map(([k, c]) => `<button class="car-item glass" onclick="setVtoCategory('${k}')" aria-label="Switch to ${c.label}"><span class="thumb">${icon(c.icon)}</span><span>${c.label}</span></button>`).join('');
+  $('vtoCarousel').insertAdjacentHTML('afterbegin', vtoProducts.map(p => `<button class="car-item glass ${p.id === vtoSelected?.id ? 'active' : ''}" onclick="selectVtoProduct(${p.id})"><span class="thumb">${vtoThumb(p)}</span><span>${esc(p.name)}</span></button>`).join(''));
 }
-function saveVtoMeasurement(){
-  const input=$('vtoMeasurement'),value=Number(input.value),category=$('vtoProduct').value;
-  if(!Number.isFinite(value)||value<=0||value>60){msg('Enter a valid soft-tape reading in inches.');return;}
-  vtoMeasurements[category]=Math.round(value*10)/10;updateVtoMeasurement();
-  $('vtoStep').textContent=vtoLiveReady?`${vtoTargetLabel()} tracked. Live try-on is following the landmarks. ${$('vtoMeasurementResult').textContent}`:'Tape reading saved for this browser session. Start try-on to track the '+vtoTargetName()+'.';
+async function initTryOn() {
+  renderVtoCats(); updateIntro(); updateMeasurementUI(); renderShots();
+  if (!vtoProducts.length || vtoProducts[0].category !== vtoCategory) await loadVtoProducts(vtoSelected?.id);
 }
-function clearVtoViews(){
-  vtoShots=[];vtoLastViewSignature=null;vtoLastViewCapture=0;
-  $('vtoShots').replaceChildren();$('vtoViewCount').textContent='0 clear views';$('vtoRetake').classList.add('hidden');$('vtoFinish').classList.add('hidden');$('vtoFinish').disabled=false;
-}
-function clearVtoOcclusion(){const canvas=$('vtoOcclusion');if(!canvas)return;const context=canvas.getContext('2d');context.clearRect(0,0,canvas.width,canvas.height);vtoOcclusionLastDraw=0;}
-function renderVtoOcclusion(landmarks,timestamp){
-  const canvas=$('vtoOcclusion'),video=$('camera');if(!canvas||!video.videoWidth||landmarks?.length!==21){clearVtoOcclusion();return;}
-  if(timestamp-vtoOcclusionLastDraw<55)return;vtoOcclusionLastDraw=timestamp;
-  const width=Math.min(960,video.videoWidth),height=Math.round(width*video.videoHeight/video.videoWidth);
-  if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height;}
-  const context=canvas.getContext('2d');context.clearRect(0,0,width,height);context.save();
-  if(vtoFacingMode==='user'){context.translate(width,0);context.scale(-1,1);}
-  const contour=[0,1,2,3,4,8,12,16,20,19,18,17],points=contour.map(index=>({x:landmarks[index].x*width,y:landmarks[index].y*height}));
-  const center=points.reduce((sum,p)=>({x:sum.x+p.x/points.length,y:sum.y+p.y/points.length}),{x:0,y:0}),pad=Math.max(3,Math.hypot(points[5].x-points[0].x,points[5].y-points[0].y)*.035);
-  context.beginPath();points.forEach((p,index)=>{const x=center.x+(p.x-center.x)*(1+pad/Math.max(1,Math.hypot(p.x-center.x,p.y-center.y))),y=center.y+(p.y-center.y)*(1+pad/Math.max(1,Math.hypot(p.x-center.x,p.y-center.y)));if(index===0)context.moveTo(x,y);else context.lineTo(x,y);});context.closePath();context.clip();context.drawImage(video,0,0,width,height);context.restore();
-}
-function toggleVtoCapture(){
-  if(vtoShots.length>=8){msg('Clear the saved views before collecting a new set.');return;}
-  vtoCapturePaused=!vtoCapturePaused;$('vtoFinish').textContent=vtoCapturePaused?'Capture more views':'Finish view capture';
-  $('vtoStep').textContent=vtoLiveReady?`${vtoTargetLabel()} tracked. Live try-on continues. ${vtoCapturePaused?'Automatic view capture is paused.':'Slowly turn to collect clear new angles.'}`:'Move the target into the guide; tracking starts when the pose is valid.';
-}
-function captureTargetPhoto(task,landmarks){
-  const video=$('camera'),w=video.videoWidth,h=video.videoHeight;
-  if(!landmarks?.length||!w||!h)return null;
-  let x1,y1,x2,y2;
-  if(task.target==='neck'){
-    const [chin,left,right]=landmarks,faceWidth=Math.max(.08,Math.abs(right.x-left.x)),cx=(left.x+right.x)/2;
-    x1=cx-faceWidth*.62;x2=cx+faceWidth*.62;y1=chin.y-faceWidth*.05;y2=chin.y+faceWidth*.72;
-  }else{
-    const used=task.target==='finger'?landmarks.slice(13,17):landmarks;
-    const xs=used.map(p=>p.x),ys=used.map(p=>p.y),span=Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
-    const padding=span*(task.target==='finger'?.7:.22);
-    x1=Math.min(...xs)-padding;x2=Math.max(...xs)+padding;y1=Math.min(...ys)-padding;y2=Math.max(...ys)+padding;
+async function setVtoCategory(category, preferId) {
+  const targetChanged = VTO_TARGET[category] !== vtoTarget();
+  vtoCategory = category; renderVtoCats(); updateMeasurementUI();
+  $('cameraGuide').className = 'camera-guide ' + vtoTarget();
+  await loadVtoProducts(preferId);
+  if (vtoLoop && targetChanged) {
+    vtoStable = 0; setStatus('Switching tracker…');
+    if (vtoTarget() === 'neck' && vtoFacingMode === 'environment') switchVtoCamera();
+    ensureVision().catch(e => msg(e.message));
   }
-  x1=Math.max(0,Math.min(w-1,Math.floor(x1*w)));x2=Math.max(x1+1,Math.min(w,Math.ceil(x2*w)));
-  y1=Math.max(0,Math.min(h-1,Math.floor(y1*h)));y2=Math.max(y1+1,Math.min(h,Math.ceil(y2*h)));
-  const scale=Math.min(1,720/(x2-x1),720/(y2-y1)),canvas=document.createElement('canvas');
-  canvas.width=Math.max(1,Math.round((x2-x1)*scale));canvas.height=Math.max(1,Math.round((y2-y1)*scale));
-  const context=canvas.getContext('2d');if(vtoFacingMode==='user'){context.translate(canvas.width,0);context.scale(-1,1);}
-  context.drawImage(video,x1,y1,x2-x1,y2-y1,0,0,canvas.width,canvas.height);
-  return canvas.toDataURL('image/jpeg',.88);
 }
-function vtoIsNewView(signature){
-  if(!signature)return !vtoShots.length;
-  if(!vtoLastViewSignature)return true;
-  if(signature.type==='normal'&&vtoLastViewSignature.type==='normal'){
-    const a=signature,b=vtoLastViewSignature,dot=Math.max(-1,Math.min(1,a.x*b.x+a.y*b.y+a.z*b.z));
-    return Math.acos(dot)>Math.PI/7;
-  }
-  if(signature.type==='angle'&&vtoLastViewSignature.type==='angle'){
-    const delta=Math.abs(((signature.value-vtoLastViewSignature.value+Math.PI*3)%(Math.PI*2))-Math.PI);
-    return delta>Math.PI/8;
-  }
-  return false;
+async function loadVtoProducts(preferId) {
+  try {
+    const rows = await api('/products?category=' + encodeURIComponent(vtoCategory));
+    vtoProducts = rows.filter(r => r.has_3d_asset);
+    const want = preferId ?? vtoPendingId, pick = vtoProducts.find(p => p.id === want) || vtoProducts.find(p => p.id === vtoSelected?.id) || vtoProducts[0] || null;
+    if (pick?.id === vtoPendingId) vtoPendingId = null;
+    if (pick) await selectVtoProduct(pick.id); else { vtoSelected = null; renderVtoProducts(); updateIntro(); }
+  } catch (e) { msg(e.message); }
 }
-function solveThree(matrix,vector){
-  const rows=matrix.map((row,index)=>[...row,vector[index]]);
-  for(let col=0;col<3;col++){
-    let pivot=col;for(let row=col+1;row<3;row++)if(Math.abs(rows[row][col])>Math.abs(rows[pivot][col]))pivot=row;
-    if(Math.abs(rows[pivot][col])<1e-10)return null;
-    [rows[col],rows[pivot]]=[rows[pivot],rows[col]];
-    const divisor=rows[col][col];for(let k=col;k<4;k++)rows[col][k]/=divisor;
-    for(let row=0;row<3;row++)if(row!==col){const factor=rows[row][col];for(let k=col;k<4;k++)rows[row][k]-=factor*rows[col][k];}
-  }
-  return rows.map(row=>row[3]);
+async function getAR() {
+  if (accessoryAR) return accessoryAR;
+  accessoryARPromise ??= import('/modules/vto3d.js?v=6').then(mod => { vtoKindFor = mod.kindFor; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
+  return accessoryARPromise;
 }
-function estimateHandProjection(imagePoints,worldPoints,sourceWidth,sourceHeight){
-  if(imagePoints?.length!==21||worldPoints?.length!==21||!sourceWidth||!sourceHeight)return null;
-  const worldMean=[0,0,0],imageMean=[0,0];
-  for(let i=0;i<21;i++){worldMean[0]+=worldPoints[i].x/21;worldMean[1]+=worldPoints[i].y/21;worldMean[2]+=worldPoints[i].z/21;imageMean[0]+=imagePoints[i].x*sourceWidth/21;imageMean[1]+=imagePoints[i].y*sourceHeight/21;}
-  const covariance=[[0,0,0],[0,0,0],[0,0,0]],crossU=[0,0,0],crossV=[0,0,0];
-  for(let i=0;i<21;i++){
-    const d=[worldPoints[i].x-worldMean[0],worldPoints[i].y-worldMean[1],worldPoints[i].z-worldMean[2]],u=imagePoints[i].x*sourceWidth-imageMean[0],v=imagePoints[i].y*sourceHeight-imageMean[1];
-    for(let row=0;row<3;row++){crossU[row]+=d[row]*u;crossV[row]+=d[row]*v;for(let col=0;col<3;col++)covariance[row][col]+=d[row]*d[col];}
-  }
-  const trace=covariance[0][0]+covariance[1][1]+covariance[2][2],regularization=Math.max(trace*1e-5,1e-12);
-  for(let axis=0;axis<3;axis++)covariance[axis][axis]+=regularization;
-  const u=solveThree(covariance,crossU),v=solveThree(covariance,crossV);if(!u||!v)return null;
-  const pixelsPerWorld=(Math.hypot(...u)+Math.hypot(...v))/2;
-  if(!Number.isFinite(pixelsPerWorld)||pixelsPerWorld<1||pixelsPerWorld>100000)return null;
-  return {worldMean,imageMean,u,v,pixelsPerWorld,project(point){const d=[point.x-worldMean[0],point.y-worldMean[1],point.z-worldMean[2]];return {x:imageMean[0]+u[0]*d[0]+u[1]*d[1]+u[2]*d[2],y:imageMean[1]+v[0]*d[0]+v[1]*d[1]+v[2]*d[2]};}};
+async function selectVtoProduct(id) {
+  const p = vtoProducts.find(r => r.id === id); if (!p) return;
+  vtoSelected = p; renderVtoProducts(); updateIntro();
+  $('stageProduct').textContent = p.name; $('stageCategory').textContent = CATEGORY[p.category].label + ' · ' + money(p.price);
+  try {
+    const url = p.asset_url || (await api('/products/' + p.id + '/asset')).url;
+    const ar = await getAR(); if (vtoSelected?.id !== id) return;
+    if (vtoLoop) setStatus('Loading ' + p.name + '…');
+    vtoStable = 0; await ar.load(url, vtoKindFor(p.category));
+  } catch { if (vtoSelected?.id === id) { setStatus('This 3D model could not be loaded.', 'error'); msg('This 3D model could not be loaded. Check that the file is a valid GLB.'); } }
 }
-function distance3(a,b){return Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z);}
-async function loadVtoModels(){
-  const category=$('vtoProduct').value,needsNeck=category==='necklaces';
-  if(vtoVisionPromise&&vtoVisionCategory===category)return vtoVisionPromise;
-  if(vtoVisionPromise)try{await vtoVisionPromise;}catch{}
-  for(const model of [handLandmarker,faceLandmarker,poseLandmarker])model?.close();
-  handLandmarker=faceLandmarker=poseLandmarker=null;
-  const load=(async()=>{
-    const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/vision_bundle.mjs');
-    const files=await vision.FilesetResolver.forVisionTasks(VTO_WASM);
-    const handUrl=VTO_MODEL_BASE+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-    const faceUrl=VTO_MODEL_BASE+'face_landmarker/face_landmarker/float16/1/face_landmarker.task';
-    const poseUrl=VTO_MODEL_BASE+'pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
-    async function create(delegate){
-      const models={};
-      try{
-        if(needsNeck){
-          models.face=await vision.FaceLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:faceUrl,delegate},runningMode:'VIDEO',numFaces:1,minFaceDetectionConfidence:.55,minFacePresenceConfidence:.55});
-          models.pose=await vision.PoseLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:poseUrl,delegate},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
-        }else models.hand=await vision.HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:handUrl,delegate},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.6,minHandPresenceConfidence:.6,minTrackingConfidence:.6});
+async function chooseVtoProduct(id, category) {
+  vtoPendingId = id;
+  if (location.hash !== '#tryon') location.hash = 'tryon';
+  await setVtoCategory(category, id);
+  if (!vtoLoop && vtoSelected?.id === id) startVto();
+  if (user) api('/history', { method: 'POST', body: { kind: 'product_view', detail: `try-on: ${vtoSelected?.name || 'product'} (product:${id})` } }).catch(() => {});
+}
+function updateIntro() {
+  const c = CATEGORY[vtoCategory], copy = VTO_COPY[vtoTarget()];
+  $('introEyebrow').textContent = c.label + ' · ' + c.target;
+  $('introTitle').textContent = vtoSelected ? vtoSelected.name : 'Try it on live';
+  $('introText').textContent = vtoSelected ? copy.text : `No ${c.label.toLowerCase()} with a 3D model are available yet.`;
+  $('introTips').innerHTML = copy.tips.map(t => `<li>${icon('check')}<span>${esc(t)}</span></li>`).join('');
+  $('vtoStart').disabled = !vtoSelected;
+  const m = $('introModel');
+  if (vtoSelected?.asset_url && m.dataset.src !== vtoSelected.asset_url) {
+    m.dataset.src = vtoSelected.asset_url;
+    m.innerHTML = `<model-viewer src="${esc(vtoSelected.asset_url)}" camera-orbit="${ORBIT[vtoSelected.category] || 'auto'}" ${ORIENT[vtoSelected.category] ? `orientation="${ORIENT[vtoSelected.category]}"` : ''} auto-rotate rotation-per-second="20deg" interaction-prompt="none" environment-image="neutral" exposure="1.1" disable-zoom></model-viewer>`;
+  } else if (!vtoSelected) { m.dataset.src = ''; m.innerHTML = ''; }
+  if (!vtoSelected) { $('stageProduct').textContent = 'Choose a piece'; $('stageCategory').textContent = 'Live try-on'; }
+}
+
+// ---------- Size ----------
+function updateMeasurementUI() {
+  const copy = VTO_COPY[vtoTarget()], value = vtoMeasurements[vtoTarget()];
+  $('vtoMeasureLabel').textContent = copy.size; $('sizeLabel').textContent = copy.size; $('sizeHelp').textContent = copy.sizeHelp;
+  $('vtoMeasurement').value = value ?? ''; $('sizeInput').value = value ?? '';
+  $('vtoMeasurementResult').textContent = value == null ? 'Measure with a soft tape for an exact fit. Without it, Juvia estimates from your ' + (vtoTarget() === 'neck' ? 'shoulders.' : 'hand.') : `Fitted to your ${value} in reading. Pieces in the preview use this size.`;
+}
+function saveVtoMeasurement(raw = $('vtoMeasurement').value) {
+  const value = Number(raw), [lo, hi] = VTO_COPY[vtoTarget()].range;
+  if (!Number.isFinite(value) || value < lo || value > hi) return msg(`Enter a reading between ${lo} and ${hi} inches.`);
+  vtoMeasurements[vtoTarget()] = Math.round(value * 10) / 10; updateMeasurementUI(); toast('Size saved: ' + vtoMeasurements[vtoTarget()] + ' in');
+}
+function openSizeDialog() { updateMeasurementUI(); openDialog('sizeDialog'); }
+
+// ---------- Camera ----------
+async function startVto() {
+  const runId = ++vtoRunId;
+  if (!vtoSelected) return msg('Choose a piece to try on first.');
+  $('vtoStart').disabled = true;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access needs HTTPS and a current browser.');
+    getAR().then(ar => { if (!ar.ready && ar.state !== 'loading') selectVtoProduct(vtoSelected.id); });
+    stopCameraStream();
+    const facing = vtoTarget() === 'neck' || !isTouch() ? 'user' : 'environment';
+    enterLive(); setStatus('Allow camera access to start');
+    const opened = await openVtoCamera(facing);
+    if (runId !== vtoRunId) { opened.getTracks().forEach(t => t.stop()); return; }
+    stream = opened; setStatus('Loading the tracker…');
+    await ensureVision();
+    if (runId !== vtoRunId) return;
+    vtoLoop = true; vtoStable = 0; vtoLocked = false; vtoLastTs = 0;
+    startWatchdog(runId); scheduleFrame(runId);
+  } catch (e) {
+    if (runId !== vtoRunId) return;
+    stopVto();
+    const denied = /denied|NotAllowed|permission/i.test(e.name + e.message);
+    msg(denied ? 'Camera permission was denied. Allow camera access in your browser settings and try again.' : 'Try-on could not start: ' + e.message);
+  } finally { $('vtoStart').disabled = !vtoSelected; }
+}
+async function openVtoCamera(mode, exact = false) {
+  const facingMode = exact ? { exact: mode } : { ideal: mode };
+  const next = await navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+  const video = $('camera'); video.srcObject = next;
+  try { await video.play(); } catch (e) { next.getTracks().forEach(t => t.stop()); video.srcObject = null; throw e; }
+  const fit = () => { if (video.videoWidth) $('cameraWrap').style.setProperty('--ar', video.videoWidth + ' / ' + video.videoHeight); };
+  video.addEventListener('loadedmetadata', fit, { once: true }); fit();
+  // Report the camera that actually opened (a laptop has only a front camera).
+  const actual = next.getVideoTracks()[0]?.getSettings?.().facingMode;
+  vtoFacingMode = actual === 'environment' || actual === 'user' ? actual : mode;
+  video.classList.toggle('rear-camera', vtoFacingMode === 'environment');
+  return next;
+}
+async function switchVtoCamera() {
+  if (!vtoLoop || !stream) return;
+  const previous = vtoFacingMode, next = previous === 'user' ? 'environment' : 'user', button = $('vtoSwitch');
+  button.disabled = true; vtoStable = 0; setStatus('Switching camera…'); stopCameraStream();
+  try { stream = await openVtoCamera(next, true); vtoLastTs = 0; toast(next === 'user' ? 'Front camera' : 'Back camera'); }
+  catch {
+    try { stream = await openVtoCamera(previous); toast('Only one camera is available on this device'); }
+    catch (e) { stopVto(); msg('Could not switch cameras: ' + e.message); }
+  } finally { button.disabled = false; }
+}
+function stopCameraStream() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } $('camera').srcObject = null; }
+function enterLive() {
+  document.body.classList.add('tryon-live');
+  $('vtoIntro').classList.add('hidden'); $('stageBottom').classList.remove('hidden'); $('vtoStop').classList.remove('hidden'); $('vtoStep').classList.remove('hidden');
+  $('cameraGuide').className = 'camera-guide show ' + vtoTarget(); renderVtoProducts();
+}
+function stopVto() {
+  vtoLoop = false; vtoRunId++; vtoLocked = false; vtoStable = 0; clearInterval(vtoWatchdog);
+  stopCameraStream(); accessoryAR?.hide(); $('vtoCanvas').style.visibility = 'hidden';
+  document.body.classList.remove('tryon-live');
+  $('vtoIntro').classList.remove('hidden'); $('stageBottom').classList.add('hidden'); $('vtoStop').classList.add('hidden'); $('vtoStep').classList.add('hidden');
+  $('cameraGuide').className = 'camera-guide ' + vtoTarget(); vtoStatusText = '';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && vtoLoop) stopVto(); });
+function startWatchdog(runId) {
+  clearInterval(vtoWatchdog); let since = 0;
+  vtoWatchdog = setInterval(() => {
+    if (runId !== vtoRunId) return clearInterval(vtoWatchdog);
+    const v = $('camera');
+    if (v.readyState >= 2 && v.videoWidth) { since = 0; return; }
+    since ||= performance.now(); setStatus('Waiting for the camera preview…');
+    if (performance.now() - since > 12000) { stopVto(); msg('The camera opened but sent no video. Check the site camera permission and try again.'); }
+  }, 1000);
+}
+
+// ---------- Trackers ----------
+async function ensureVision() {
+  const key = vtoTarget() === 'neck' ? 'neck' : 'hand';
+  if (vtoVisionPromise && vtoVisionKey === key) return vtoVisionPromise;
+  if (vtoVisionPromise) try { await vtoVisionPromise; } catch {}
+  for (const m of [handLandmarker, faceLandmarker, poseLandmarker]) m?.close();
+  handLandmarker = faceLandmarker = poseLandmarker = null; vtoFaceCache = null;
+  const load = (async () => {
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/vision_bundle.mjs');
+    const files = await vision.FilesetResolver.forVisionTasks(VTO_WASM);
+    const create = async delegate => {
+      const models = {};
+      try {
+        if (key === 'neck') {
+          models.face = await vision.FaceLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: VTO_MODEL_BASE + 'face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate }, runningMode: 'VIDEO', numFaces: 1, minFaceDetectionConfidence: .5, minFacePresenceConfidence: .5 });
+          models.pose = await vision.PoseLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: VTO_MODEL_BASE + 'pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate }, runningMode: 'VIDEO', numPoses: 1, minPoseDetectionConfidence: .5, minPosePresenceConfidence: .5, minTrackingConfidence: .5 });
+        } else models.hand = await vision.HandLandmarker.createFromOptions(files, { baseOptions: { modelAssetPath: VTO_MODEL_BASE + 'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate }, runningMode: 'VIDEO', numHands: 1, minHandDetectionConfidence: .55, minHandPresenceConfidence: .55, minTrackingConfidence: .55 });
         return models;
-      }catch(e){Object.values(models).forEach(model=>model.close());throw e;}
-    }
-    try{return await create('GPU');}catch{return await create('CPU');}
+      } catch (e) { Object.values(models).forEach(m => m.close()); throw e; }
+    };
+    try { return await create('GPU'); } catch { return await create('CPU'); }
   })();
-  vtoVisionCategory=category;vtoVisionPromise=load;
-  try{const models=await load;if(vtoVisionPromise===load){handLandmarker=models.hand||null;faceLandmarker=models.face||null;poseLandmarker=models.pose||null;}return models;}
-  catch(e){if(vtoVisionPromise===load){vtoVisionPromise=null;vtoVisionCategory='';}throw e;}
-}
-async function loadVtoModelsWithTimeout(){
+  vtoVisionKey = key; vtoVisionPromise = load;
   let timer;
-  try{return await Promise.race([loadVtoModels(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('The target-tracking model did not load within 45 seconds. Check your connection and tap Start live try-on to retry.')),45000);})]);}
-  catch(e){if(e.message.includes('45 seconds')){vtoVisionPromise=null;vtoVisionCategory='';}throw e;}
-  finally{clearTimeout(timer);}
+  try {
+    const models = await Promise.race([load, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The tracker did not load within 45 seconds. Check your connection and try again.')), 45000); })]);
+    if (vtoVisionPromise === load) { handLandmarker = models.hand || null; faceLandmarker = models.face || null; poseLandmarker = models.pose || null; }
+    return models;
+  } catch (e) { if (vtoVisionPromise === load) { vtoVisionPromise = null; vtoVisionKey = ''; } throw e; }
+  finally { clearTimeout(timer); }
 }
-function vtoToast(text){const el=$('vtoToast');el.textContent=text;el.classList.remove('hidden');clearTimeout(vtoToastTimer);vtoToastTimer=setTimeout(()=>el.classList.add('hidden'),2400);}
-function resetVto(){stopVto();vtoTasks=[];vtoStable=0;vtoCapturePaused=false;vtoLiveReady=false;vtoLastDetected='';clearVtoViews();updateVtoMeasurement();$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';$('vtoStep').textContent='Choose a product with an image or linked 3D model.';}
-async function loadVtoProducts(){
-  const category=$('vtoProduct').value,select=$('vtoItem');
-  try{
-    vtoProducts=await api('/products?category='+encodeURIComponent(category));
-    select.innerHTML='<option value="">Choose a product</option>'+vtoProducts.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
-    vtoSelected=null;$('vtoOverlay').removeAttribute('src');$('vtoOverlay').style.display='none';$('vtoModel').removeAttribute('src');$('vtoModel').style.display='none';
-    if(!vtoProducts.length)$('vtoStep').textContent='No products in this category yet.';
-  }catch(e){msg(e.message);}
+const visionReady = () => vtoTarget() === 'neck' ? !!(faceLandmarker && poseLandmarker && vtoVisionKey === 'neck') : !!(handLandmarker && vtoVisionKey === 'hand');
+
+// ---------- Per-frame loop ----------
+function scheduleFrame(runId) {
+  const video = $('camera'), next = () => { if (!vtoLoop || runId !== vtoRunId) return; processFrame(); scheduleFrame(runId); };
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(next); else requestAnimationFrame(next);
 }
-async function setVtoItem(){
-  const id=Number($('vtoItem').value);vtoSelected=vtoProducts.find(p=>p.id===id)||null;
-  vtoOverlayState=null;hideWristAR();
-  const overlay=$('vtoOverlay'),model=$('vtoModel');overlay.style.display='none';model.style.display='none';model.style.opacity='0';model.removeAttribute('src');model.dataset.ready='false';model.dataset.error='';model.dataset.productId='';clearVtoOcclusion();
-  if(!vtoSelected){overlay.removeAttribute('src');$('vtoStep').textContent='Choose a product with an image or linked 3D model.';return;}
-  if(vtoSelected.image)overlay.src=vtoSelected.image;
-  $('vtoStep').textContent='Product selected. Start live try-on to locate the '+vtoTargetName()+'.';
-  try{
-    const productId=vtoSelected.id,asset=await api('/products/'+productId+'/asset');
-    if(vtoSelected?.id!==productId)return;
-    if(vtoIsWristCategory()){
-      const ar=await getWristAR();if(vtoSelected?.id!==productId)return;
-      ar.productId=productId;hideWristAR();
-      $('vtoStep').textContent='Loading the 3D '+(vtoSelected.category==='bracelets'?'bracelet':'watch')+' model…';
-      try{await ar.load(asset.url);if(vtoSelected?.id===productId&&!vtoLoop)$('vtoStep').textContent='3D model ready. Start live try-on to locate the '+vtoTargetName()+'.';}
-      catch{if(vtoSelected?.id===productId)$('vtoStep').textContent='This 3D model could not be loaded. Check that the file is a valid GLB.';}
-      return;
-    }
-    model.dataset.productId=String(productId);model.addEventListener('load',()=>{if(vtoSelected?.id===productId){model.dataset.ready='true';model.dataset.error='';overlay.style.display='none';if(!vtoLoop)model.style.display='none';}},{once:true});model.addEventListener('error',event=>{if(vtoSelected?.id===productId){model.dataset.error=event.detail?.type||'load';model.dataset.ready='false';model.style.display='none';clearVtoOcclusion();$('vtoStep').textContent='This 3D model could not be loaded. Check that the file is a valid GLB.';}},{once:true});model.style.display='block';model.style.opacity='0';model.style.width='180px';model.style.height='180px';model.setAttribute('src',asset.url);
-  }catch{}
+function processFrame() {
+  const video = $('camera'); if (video.readyState < 2 || !video.videoWidth) return;
+  if (!visionReady()) return;
+  const ts = Math.max(performance.now(), vtoLastTs + 1); vtoLastTs = ts;
+  let status;
+  try { status = frameStatus(vtoTarget(), ts); } catch (e) { stopVto(); msg('Tracking stopped: ' + e.message); return; }
+  const pose = status.found ? renderAccessory(status) : (accessoryAR?.miss(), null);
+  vtoStable = status.ready ? Math.min(vtoStable + 1, 30) : 0;
+  const locked = vtoStable >= 5 && !!pose;
+  if (locked && !vtoLocked) { navigator.vibrate?.(10); if (user && vtoLoggedRun !== vtoRunId) { vtoLoggedRun = vtoRunId; api('/history', { method: 'POST', body: { kind: 'try_on', detail: `${vtoSelected?.name || 'Piece'} on your ${CATEGORY[vtoCategory].target.toLowerCase()}` } }).catch(() => {}); } }
+  vtoLocked = locked;
+  const guide = $('cameraGuide'); guide.classList.toggle('show', !locked); guide.classList.toggle('near', status.found && !locked); guide.classList.toggle('locked', locked);
+  updateLiveStatus(status, pose, locked);
+  if (locked) maybeAutoCapture(status, ts);
 }
-async function chooseVtoProduct(id,category){
-  $('vtoProduct').value=category;
-  if(!vtoProducts.some(p=>p.category===category))await loadVtoProducts();
-  $('vtoItem').value=String(id);await setVtoItem();show('tryon');
-  api('/history',{method:'POST',body:{kind:'product_view',detail:`try-on product:${id}`}}).catch(()=>{});
-}
-async function hasVtoPreview(product){
-  if(!product)return false;
-  try{await api('/products/'+product.id+'/asset');return true;}catch{return false;}
-}
-async function startVto(){
-  const runId=++vtoRunId;
-  let permissionTimer;
-  try{
-    $('vtoStart').disabled=true;$('vtoStart').classList.add('hidden');$('vtoStop').classList.remove('hidden');$('vtoStep').textContent='Checking the selected product and preparing your camera…';
-    vtoLoop=false;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();setVtoGuideValidity(false);
-    if(!vtoProducts.length)await loadVtoProducts();
-    if(runId!==vtoRunId)return;
-    if(vtoIsWristCategory()&&vtoSelected&&!vtoModelReady()&&!vtoModelError())await setVtoItem();
-    if(runId!==vtoRunId)return;
-    if(!await hasVtoPreview(vtoSelected))throw new Error('Live AR needs a linked 3D GLB model. A flat catalogue image cannot follow or rotate with your wrist.');
-    if(runId!==vtoRunId)return;
-    if(!navigator.mediaDevices?.getUserMedia)throw new Error('Camera access requires HTTPS and a current mobile browser.');
-    vtoTasks=vtoPlan($('vtoProduct').value);vtoStable=0;vtoCapturePaused=false;vtoLiveReady=false;vtoLastDetected='';clearVtoViews();$('vtoFinish').textContent='Finish view capture';$('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0])+' is-invalid';updateVtoMeasurement();
-    $('vtoStep').textContent='Allow camera access when your browser asks. Your camera preview will appear here.';
-    permissionTimer=setTimeout(()=>{if(runId===vtoRunId&&!stream)$('vtoStep').textContent='Still waiting for camera permission. Choose Allow in your browser, or tap Stop camera to cancel.';},8000);
-    const openedStream=await openVtoCamera(vtoFacingMode);
-    clearTimeout(permissionTimer);permissionTimer=null;
-    if(runId!==vtoRunId){openedStream.getTracks().forEach(track=>track.stop());if($('camera').srcObject===openedStream)$('camera').srcObject=null;return;}
-    stream=openedStream;$('vtoSwitch').classList.remove('hidden');$('vtoStep').textContent='Camera is on. Loading the '+(vtoProductKind()==='neck'?'neck and shoulder':'hand')+' tracking model on this device.';
-    await loadVtoModelsWithTimeout();
-    if(runId!==vtoRunId)return;
-    vtoTasks=vtoPlan($('vtoProduct').value);vtoStable=0;vtoLiveReady=false;vtoLastDetected='';clearVtoViews();vtoLoop=true;
-    $('cameraGuide').className='camera-guide '+vtoGuideClass(vtoTasks[0])+' is-invalid';await vtoScan(runId);
-  }catch(e){if(runId===vtoRunId){stopVto();$('vtoStep').textContent='Try-on could not start: '+e.message;msg(e.message);}}
-  finally{clearTimeout(permissionTimer);if(runId===vtoRunId)$('vtoStart').disabled=false;}
-}
-async function openVtoCamera(mode,exact=false){
-  const facingMode=exact?{exact:mode}:{ideal:mode};
-  const nextStream=await navigator.mediaDevices.getUserMedia({video:{facingMode,width:{ideal:720},height:{ideal:960}},audio:false});
-  const video=$('camera');video.srcObject=nextStream;
-  try{await video.play();}catch(e){nextStream.getTracks().forEach(track=>track.stop());video.srcObject=null;throw e;}
-  const fitCameraFrame=()=>{if(video.videoWidth&&video.videoHeight)video.parentElement.style.aspectRatio=video.videoWidth+' / '+video.videoHeight;};
-  video.addEventListener('loadedmetadata',fitCameraFrame,{once:true});fitCameraFrame();
-  vtoFacingMode=mode;video.classList.toggle('rear-camera',mode==='environment');
-  return nextStream;
-}
-async function switchVtoCamera(){
-  if(!vtoLoop||!stream)return;
-  const previous=vtoFacingMode,next=previous==='user'?'environment':'user',button=$('vtoSwitch');
-  button.disabled=true;vtoStable=0;vtoFrameWaitSince=0;setVtoGuideValidity(false);$('vtoStep').textContent='Switching camera…';stopCameraStream();
-  try{stream=await openVtoCamera(next,true);vtoLastTimestamp=0;vtoToast(next==='user'?'Front camera':'Back camera');}
-  catch(e){
-    try{stream=await openVtoCamera(previous);$('vtoStep').textContent='That camera is unavailable; continuing with the previous camera.';}
-    catch{stopVto();msg('Could not switch cameras: '+e.message);}
-  }finally{button.disabled=false;}
-}
-function frameStatus(task,timestamp){
-  let found=false,ready=false,guidance=task.hint,rawPoints=[],landmarks=[],signature=null;
-  if(task.target==='neck'){
-    const face=faceLandmarker.detectForVideo($('camera'),timestamp).faceLandmarks?.[0]||[];
-    const pose=poseLandmarker.detectForVideo($('camera'),timestamp).landmarks?.[0]||[];
-    if(!face.length)guidance='Frame your head above the neck guide; a face alone will not count as a neck view.';
-    else{
-      found=true;const faceWidth=Math.abs(face[454].x-face[234].x),faceCenter=(face[454].x+face[234].x)/2,chin=face[152];
-      const left=pose[11],right=pose[12],visibility=p=>p?(p.visibility??p.presence??0):0;
-      if(faceCenter<.18||faceCenter>.82||chin.y<.08||chin.y>.72)guidance='Center your head above the neck guide.';
-      else if(faceWidth<.16)guidance='Move back until your neck and both shoulders fit in the frame.';
-      else if(faceWidth>.62)guidance='Move slightly farther from the camera.';
-      else if(!left||!right||visibility(left)<.35||visibility(right)<.35)guidance='Move back until both shoulders are visible; a face alone does not count as a neck view.';
-      else{
-        const shoulderMid={x:(left.x+right.x)/2,y:(left.y+right.y)/2};
-        if(shoulderMid.y<chin.y+.07)guidance='Keep the full neck between your jaw and shoulders in view.';
-        else if(Math.abs(left.x-right.x)<faceWidth*1.15)guidance='Face the camera and include both shoulders.';
-        else{ready=true;guidance='Neck and both shoulders detected. Live tracking is ready; turn slowly for more views.';}
-        const yaw=Math.atan2((face[234].x+face[454].x)/2-face[1].x,Math.max(.01,faceWidth*.5));
-        signature={type:'angle',value:yaw};
-        landmarks=[{x:chin.x,y:chin.y,z:chin.z},{x:left.x,y:left.y,z:left.z},{x:right.x,y:right.y,z:right.z}];
-      }
-    }
-  }else{
-    const result=handLandmarker.detectForVideo($('camera'),timestamp);rawPoints=result.landmarks?.[0]||[];
-    const hand=(result.handedness||result.handednesses)?.[0]?.[0];if(hand?.categoryName)vtoHandedness=hand.categoryName;
-    if(rawPoints.length===21){
-      found=true;const xs=rawPoints.map(p=>p.x),ys=rawPoints.map(p=>p.y),span=Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
-      if(task.target==='finger'){
-        const ring=rawPoints.slice(13,17),ringLength=Math.hypot(ring[3].x-ring[0].x,ring[3].y-ring[0].y),cx=ring.reduce((sum,p)=>sum+p.x,0)/ring.length,cy=ring.reduce((sum,p)=>sum+p.y,0)/ring.length;
-        if(cx<.12||cx>.88||cy<.12||cy>.9)guidance='Move the ring finger into the guide.';
-        else if(ringLength<.12)guidance='Move closer and keep the ring finger base, joints, and tip visible.';
-        else if(span>.94)guidance='Move slightly farther back so the ring finger stays in frame.';
-        else{ready=true;guidance='Ring finger landmarks detected. Live tracking is ready; rotate slowly for more views.';}
-        signature={type:'angle',value:Math.atan2(ring[3].y-ring[0].y,ring[3].x-ring[0].x)};
-      }else{
-        const wrist=rawPoints[0],palm={x:(rawPoints[5].x+rawPoints[17].x)/2,y:(rawPoints[5].y+rawPoints[17].y)/2},cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
-        if(cx<.14||cx>.86||cy<.12||cy>.9||wrist.x<.08||wrist.x>.92||wrist.y<.08||wrist.y>.94)guidance='Move your wrist, lower forearm, and hand into the guide; keep your face outside it.';
-        else if(span<.2)guidance='Move your hand closer so Juvia can see the wrist landmarks clearly.';
-        else if(span>.88)guidance='Move slightly farther back and keep your hand in frame.';
-        else if(Math.hypot(wrist.x-palm.x,wrist.y-palm.y)<.1)guidance='Show the wrist joint and the base of your palm together.';
-        else{ready=true;guidance='Wrist landmarks detected. Live tracking is ready; roll your wrist slowly for more views.';}
-      }
-      landmarks=rawPoints.map(p=>({x:p.x,y:p.y,z:p.z}));
-      if(task.target==='wrist'){
-        const worldPoints=result.worldLandmarks?.[0]?.length===21?result.worldLandmarks[0]:null,points=worldPoints||rawPoints;
-        const a={x:points[5].x-points[0].x,y:points[5].y-points[0].y,z:points[5].z-points[0].z},b={x:points[17].x-points[0].x,y:points[17].y-points[0].y,z:points[17].z-points[0].z};
-        const normal={x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x},length=Math.hypot(normal.x,normal.y,normal.z)||1;
-        const palmNormal={x:normal.x/length,y:normal.y/length,z:normal.z/length};landmarks.palmNormal=palmNormal;signature={type:'normal',...palmNormal};
-        if(worldPoints){landmarks.worldPoints=worldPoints.map(p=>({x:p.x,y:p.y,z:p.z}));landmarks.handedness=vtoHandedness;}
-      }
-      landmarks.signature=signature;
-    }
+function frameStatus(target, ts) {
+  const video = $('camera');
+  if (target === 'neck') {
+    if (!vtoFaceCache || vtoFrameNo++ % 2 === 0) vtoFaceCache = faceLandmarker.detectForVideo(video, ts).faceLandmarks?.[0] || [];
+    const result = poseLandmarker.detectForVideo(video, ts), pose = result.landmarks?.[0] || [], world = result.worldLandmarks?.[0] || [], face = vtoFaceCache;
+    if (!face.length) return { found: false, guidance: 'Face the camera so your face and neck are visible' };
+    const faceWidth = Math.abs(face[454].x - face[234].x), faceCenter = (face[454].x + face[234].x) / 2, chin = face[152];
+    const left = pose[11], right = pose[12], vis = p => p ? (p.visibility ?? p.presence ?? 0) : 0;
+    let ready = false, guidance;
+    if (faceCenter < .15 || faceCenter > .85 || chin.y < .06 || chin.y > .75) guidance = 'Centre your face in the frame';
+    else if (faceWidth > .62) guidance = 'Move the phone a little farther away';
+    else if (!left || !right || vis(left) < .35 || vis(right) < .35) guidance = 'Move back so both shoulders are visible';
+    else if ((left.y + right.y) / 2 < chin.y + .05) guidance = 'Show your neck between chin and shoulders';
+    else { ready = true; guidance = 'Looking good'; }
+    const yaw = Math.atan2((face[234].x + face[454].x) / 2 - face[1].x, Math.max(.01, faceWidth * .5));
+    return { found: true, ready, guidance, signature: { type: 'angle', value: yaw }, chin, shoulders: left && right ? [left, right] : null, shouldersWorld: world[11] && world[12] ? [world[11], world[12]] : null, box: [chin.x - faceWidth * .9, chin.y - faceWidth * .35, chin.x + faceWidth * .9, chin.y + faceWidth * 1.1] };
   }
-  if(task.target==='neck'&&landmarks.length)landmarks.signature=signature;
-  return {found,ready,guidance,landmarks,signature};
-}
-function renderWristAR(landmarks){
-  if(!wristAR||!vtoModelReady()||!landmarks.worldPoints){hideWristAR();return null;}
-  if(!placeVtoCanvas())return null;
-  const video=$('camera'),tape=vtoMeasurements[$('vtoProduct').value];
-  return wristAR.update({video,image:landmarks,world:landmarks.worldPoints,width:video.videoWidth,height:video.videoHeight,handedness:landmarks.handedness,tapeInches:tape==null?undefined:Number(tape)});
-}
-function renderVtoOverlay(task,landmarks){
-  if(task.target==='wrist'){$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';return renderWristAR(landmarks);}
-  const video=$('camera'),rect=video.getBoundingClientRect(),model=$('vtoModel'),useModel=model.dataset.productId===String(vtoSelected?.id)&&model.dataset.ready==='true',overlay=model;
-  if(!useModel||landmarks.length<2||!rect.width||!rect.height){$('vtoOverlay').style.display='none';model.style.opacity='0';model.style.display='none';vtoOverlayState=null;return;}
-  const sourceWidth=video.videoWidth||rect.width,sourceHeight=video.videoHeight||rect.height,fit=getComputedStyle(video).objectFit;
-  const scale=fit==='cover'?Math.max(rect.width/sourceWidth,rect.height/sourceHeight):Math.min(rect.width/sourceWidth,rect.height/sourceHeight),contentWidth=sourceWidth*scale,contentHeight=sourceHeight*scale,offsetX=(rect.width-contentWidth)/2,offsetY=(rect.height-contentHeight)/2;
-  let centerX,centerY,width,angle=0;
-  const displayPoint=p=>({x:offsetX+(vtoFacingMode==='user'?1-p.x:p.x)*contentWidth,y:offsetY+p.y*contentHeight});
-  if(task.target==='neck'){
-    const chin=displayPoint(landmarks[0]),left=displayPoint(landmarks[1]),right=displayPoint(landmarks[2]),shoulderY=(left.y+right.y)/2,span=Math.hypot(right.x-left.x,right.y-left.y);
-    centerX=(left.x+right.x)/2;centerY=chin.y+(shoulderY-chin.y)*.62;width=span*.58;angle=Math.atan2(right.y-left.y,right.x-left.x)*180/Math.PI;
-  }else if(task.target==='finger'){
-    const proximal=displayPoint(landmarks[13]),middle=displayPoint(landmarks[14]);
-    centerX=proximal.x+(middle.x-proximal.x)*.42;centerY=proximal.y+(middle.y-proximal.y)*.42;width=Math.max(22,Math.hypot(middle.x-proximal.x,middle.y-proximal.y)*.9);angle=Math.atan2(middle.y-proximal.y,middle.x-proximal.x)*180/Math.PI+90;
-  }else{
-    const wrist=displayPoint(landmarks[0]),palm=displayPoint(landmarks[9]),forearmX=wrist.x-palm.x,forearmY=wrist.y-palm.y;
-    angle=Math.atan2(forearmY,forearmX)*180/Math.PI-90;
-    const world=landmarks.worldPoints,projection=landmarks.worldProjection;
-    if(world?.length===21&&projection){
-      const hand={x:(world[5].x+world[9].x+world[17].x)/3-world[0].x,y:(world[5].y+world[9].y+world[17].y)/3-world[0].y,z:(world[5].z+world[9].z+world[17].z)/3-world[0].z},handLength=Math.hypot(hand.x,hand.y,hand.z)||1;
-      const anchor={x:world[0].x-hand.x/handLength*handLength*.24,y:world[0].y-hand.y/handLength*handLength*.24,z:world[0].z-hand.z/handLength*handLength*.24};
-      const projected=projection.project(anchor),target=displayPoint({x:projected.x/sourceWidth,y:projected.y/sourceHeight});centerX=target.x;centerY=target.y;
-      const measured=vtoMeasurements[$('vtoProduct').value],wristBreadth=measured?Number(measured)*.0254/3.35:distance3(world[5],world[17])*.70,caseWidth=wristBreadth*.80,pixelsPerWorld=projection.pixelsPerWorld*scale;
-      let faceFraction=.52;try{const d=model.getDimensions?.();if(d&&[d.x,d.y,d.z].every(n=>Number.isFinite(n)&&n>0))faceFraction=Math.max(.28,Math.min(.78,Math.min(d.x,d.y)/Math.max(d.x,d.y,d.z)));}catch{}
-      width=Math.max(58,Math.min(rect.width*.92,caseWidth*pixelsPerWorld/faceFraction));
-    }else{
-      const index=displayPoint(landmarks[5]),pinky=displayPoint(landmarks[17]),palmWidth=Math.hypot(index.x-pinky.x,index.y-pinky.y);
-      centerX=wrist.x+forearmX/(Math.hypot(forearmX,forearmY)||1)*palmWidth*.10;centerY=wrist.y+forearmY/(Math.hypot(forearmX,forearmY)||1)*palmWidth*.10;width=Math.max(58,palmWidth*1.12);
-    }
+  const result = handLandmarker.detectForVideo(video, ts), points = result.landmarks?.[0] || [];
+  const hand = (result.handedness || result.handednesses)?.[0]?.[0]; if (hand?.categoryName) vtoHandedness = hand.categoryName;
+  if (points.length !== 21) return { found: false, guidance: VTO_COPY[target].search };
+  const xs = points.map(p => p.x), ys = points.map(p => p.y), span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+  const world = result.worldLandmarks?.[0]?.length === 21 ? result.worldLandmarks[0].map(p => ({ x: p.x, y: p.y, z: p.z })) : null;
+  const image = points.map(p => ({ x: p.x, y: p.y, z: p.z }));
+  let ready = false, guidance, signature;
+  if (target === 'finger') {
+    const ring = points.slice(13, 17), len = Math.hypot(ring[3].x - ring[0].x, ring[3].y - ring[0].y), cx = ring.reduce((s, p) => s + p.x, 0) / 4, cy = ring.reduce((s, p) => s + p.y, 0) / 4;
+    if (cx < .08 || cx > .92 || cy < .08 || cy > .92) guidance = 'Bring your ring finger into the frame';
+    else if (len < .09) guidance = 'Move your hand closer';
+    else if (span > .95) guidance = 'Move your hand a little farther away';
+    else { ready = true; guidance = 'Looking good'; }
+    signature = { type: 'angle', value: Math.atan2(ring[3].y - ring[0].y, ring[3].x - ring[0].x) };
+  } else {
+    const wrist = points[0], palm = { x: (points[5].x + points[17].x) / 2, y: (points[5].y + points[17].y) / 2 };
+    if (wrist.x < .04 || wrist.x > .96 || wrist.y < .04 || wrist.y > .96) guidance = 'Bring your wrist into the frame';
+    else if (span < .16) guidance = 'Move your hand closer';
+    else if (span > .9) guidance = 'Move your hand a little farther away';
+    else if (Math.hypot(wrist.x - palm.x, wrist.y - palm.y) < .07) guidance = 'Show your wrist and the base of your palm';
+    else { ready = true; guidance = 'Looking good'; }
   }
-  const normal=landmarks.palmNormal||{x:0,y:0,z:1},pitch=Math.max(-80,Math.min(80,Math.asin(Math.max(-1,Math.min(1,-normal.y)))*180/Math.PI)),yaw=Math.max(-180,Math.min(180,Math.atan2(normal.x,normal.z)*180/Math.PI));
-  const target={x:centerX,y:centerY,width,angle,pitch,yaw,target:task.target,productId:vtoSelected?.id};
-  if(!vtoOverlayState||vtoOverlayState.target!==target.target||vtoOverlayState.productId!==target.productId)vtoOverlayState=target;
-  else{
-    const angleDelta=((target.angle-vtoOverlayState.angle+540)%360)-180,follow=.62;
-    vtoOverlayState.x+=(target.x-vtoOverlayState.x)*follow;vtoOverlayState.y+=(target.y-vtoOverlayState.y)*follow;vtoOverlayState.width+=(target.width-vtoOverlayState.width)*follow;vtoOverlayState.angle+=angleDelta*follow;vtoOverlayState.pitch+=(target.pitch-vtoOverlayState.pitch)*follow;
+  if (!signature && world) {
+    const a = { x: world[5].x - world[0].x, y: world[5].y - world[0].y, z: world[5].z - world[0].z }, b = { x: world[17].x - world[0].x, y: world[17].y - world[0].y, z: world[17].z - world[0].z };
+    const n = { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }, l = Math.hypot(n.x, n.y, n.z) || 1;
+    signature = { type: 'normal', x: n.x / l, y: n.y / l, z: n.z / l };
   }
-  const yawDelta=((target.yaw-vtoOverlayState.yaw+540)%360)-180;vtoOverlayState.yaw+=yawDelta*.62;
-  ({x:centerX,y:centerY,width,angle}=vtoOverlayState);
-  if(useModel&&task.target==='wrist'){
-    const snap=value=>Math.round(value/2)*2,orientation='0deg '+snap(vtoOverlayState.pitch)+'deg '+snap(vtoOverlayState.yaw)+'deg';
-    if(overlay.getAttribute('orientation')!==orientation)overlay.setAttribute('orientation',orientation);
-  }
-  overlay.style.width=width+'px';if(useModel){overlay.style.height=width+'px';overlay.style.opacity='1';}overlay.style.left=centerX+'px';overlay.style.top=centerY+'px';overlay.style.transform='translate(-50%,-50%) rotate('+angle+'deg)';overlay.style.display='block';if(useModel)$('vtoOverlay').style.display='none';else{model.style.opacity='0';model.style.display='block';}
+  const used = target === 'finger' ? points.slice(9, 18) : points, ux = used.map(p => p.x), uy = used.map(p => p.y);
+  return { found: true, ready, guidance, image, world, handedness: vtoHandedness, signature, box: [Math.min(...ux), Math.min(...uy), Math.max(...ux), Math.max(...uy)] };
 }
-async function vtoScan(runId){
-  while(vtoLoop&&runId===vtoRunId){
-    const task=vtoTasks[0],video=$('camera');if(!task)break;
-    if(video.readyState<2||!video.videoWidth){
-      if(!vtoFrameWaitSince){vtoFrameWaitSince=performance.now();$('vtoStep').textContent='Waiting for a live camera preview. Keep Juvia open while the camera starts.';}
-      else if(performance.now()-vtoFrameWaitSince>12000){stopVto();$('vtoStep').textContent='The camera opened but sent no video frames. Check site camera permission, then tap Start live try-on again.';return;}
-      await new Promise(resolve=>setTimeout(resolve,150));continue;
-    }
-    vtoFrameWaitSince=0;const timestamp=Math.max(performance.now(),vtoLastTimestamp+1);vtoLastTimestamp=timestamp;
-    let status;try{status=frameStatus(task,timestamp);}catch(e){stopVto();$('vtoStep').textContent='Landmark tracking stopped: '+e.message;return;}
-    let wristPose=null;
-    if(status.found){wristPose=renderVtoOverlay(task,status.landmarks);clearVtoOcclusion();}else{const model=$('vtoModel');model.style.opacity='0';model.style.display='none';$('vtoOverlay').style.display='none';clearVtoOcclusion();if(wristAR)wristAR.miss();}
-    const detectionKey=status.ready?task.target:'';
-    if(detectionKey&&detectionKey!==vtoLastDetected)vtoToast(vtoTargetLabel()+' detected');vtoLastDetected=detectionKey;
-    vtoStable=status.ready?Math.min(vtoStable+1,30):0;
-    setVtoGuideValidity(vtoStable>=3);
-    if(status.ready&&vtoStable>=8)vtoLiveReady=true;
-    if(!status.ready&&vtoStable===0)vtoLiveReady=false;
-    if(status.ready){
-      const modelReady=vtoModelReady();
-      const modelError=vtoModelError(),turnText=task.target==='wrist'&&wristPose&&wristPose.dialFacing<-.35?'You are seeing the strap side; turn the back of your wrist to the camera to see the dial. ':'',liveText=turnText+(task.target==='wrist'&&modelError?'Wrist detected, but the 3D model failed to load. Check this product’s GLB asset. ':task.target==='wrist'&&!modelReady?'Wrist tracking is active. Loading the linked 3D model… ':vtoLiveReady?'Live tracking your '+vtoTargetName()+'. Move naturally; the accessory follows. ':'Hold this pose briefly to lock live tracking. ');
-      const viewText=vtoCapturePaused?'Automatic view capture is paused. ':vtoShots.length+' clear '+vtoTargetName()+' view'+(vtoShots.length===1?'':'s')+' saved. Turn slowly for a new angle. ';
-      const measurement=vtoMeasurements[$('vtoProduct').value];
-      $('vtoStep').textContent=liveText+viewText+(measurement?'Soft-tape reading: '+measurement+' in.':'For a true circumference, enter a soft-tape reading below.');
-    }else $('vtoStep').textContent=status.guidance;
-    if(vtoLiveReady&&!vtoCapturePaused&&vtoShots.length<8&&vtoStable>=12&&timestamp-vtoLastViewCapture>1200&&vtoIsNewView(status.signature)){
-      const photo=captureTargetPhoto(task,status.landmarks);
-      if(photo){
-        const number=vtoShots.length+1,label=vtoTargetLabel()+' view '+number;vtoShots.push({photo,label,target:task.target,signature:status.signature});vtoLastViewSignature=status.signature;vtoLastViewCapture=timestamp;
-        const card=document.createElement('div');card.className='shot';card.innerHTML='<img alt="'+esc(label)+'" src="'+photo+'"><small>'+esc(label)+'</small>';$('vtoShots').appendChild(card);
-        $('vtoViewCount').textContent=number+' clear view'+(number===1?'':'s');$('vtoRetake').classList.remove('hidden');$('vtoFinish').classList.remove('hidden');vtoToast('Clear '+vtoTargetName()+' view saved');
-        if(number===1)api('/history',{method:'POST',body:{kind:'try_on',detail:vtoSelected.name+': adaptive '+vtoTargetName()+' views'}}).catch(()=>{});
-        if(number>=8){vtoCapturePaused=true;$('vtoFinish').textContent='8-view limit reached';$('vtoFinish').disabled=true;$('vtoStep').textContent='Eight clear views saved. Live tracking continues; clear views to collect a new set.';}
-      }
-    }
-    await new Promise(resolve=>setTimeout(resolve,33));
-  }
+function placeVtoCanvas() {
+  const video = $('camera'), canvas = $('vtoCanvas'), rect = video.getBoundingClientRect(), wrap = $('cameraWrap').getBoundingClientRect();
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh || !rect.width || !rect.height) return false;
+  const fit = getComputedStyle(video).objectFit, scale = fit === 'cover' ? Math.max(rect.width / vw, rect.height / vh) : Math.min(rect.width / vw, rect.height / vh);
+  const w = vw * scale, h = vh * scale, left = rect.left - wrap.left + (rect.width - w) / 2, top = rect.top - wrap.top + (rect.height - h) / 2;
+  Object.assign(canvas.style, { left: left + 'px', top: top + 'px', width: w + 'px', height: h + 'px', transform: vtoFacingMode === 'user' ? 'scaleX(-1)' : 'none', visibility: 'visible' });
+  accessoryAR.resize(w, h, vw, vh); return true;
 }
-function retakeVto(){
-  if(!vtoLoop||!stream)return;
-  clearVtoViews();vtoStable=0;vtoLiveReady=false;vtoCapturePaused=false;$('vtoFinish').textContent='Finish view capture';
-  $('vtoStep').textContent='View collection restarted. Keep the '+vtoTargetName()+' in the guide; live tracking continues.';
+function renderAccessory(status) {
+  if (!accessoryAR?.ready || !vtoSelected) { accessoryAR?.hide(); return null; }
+  if (!placeVtoCanvas()) return null;
+  const video = $('camera'), tape = vtoMeasurements[vtoTarget()];
+  return accessoryAR.update({ video, width: video.videoWidth, height: video.videoHeight, image: status.image, world: status.world, handedness: status.handedness, chin: status.chin, shoulders: status.shoulders, shouldersWorld: status.shouldersWorld, tapeInches: tape == null ? undefined : Number(tape) });
 }
-function stopCameraStream(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}$('camera').srcObject=null;}
-function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();clearVtoOcclusion();hideWristAR();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoFinish').classList.add('hidden');$('vtoFinish').disabled=false;$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');$('vtoStart').disabled=false;setVtoGuideValidity(false);}
-async function startCamera(){return startVto();}
-async function capture(){return startVto();}
+function setStatus(text, kind = '') {
+  const el = $('vtoStep'); if (vtoStatusText === text + kind) return; vtoStatusText = text + kind;
+  el.textContent = text; el.className = 'status-pill ' + kind;
+}
+function updateLiveStatus(status, pose, locked) {
+  if (!accessoryAR?.ready) return setStatus(accessoryAR?.state === 'error' ? 'This 3D model could not be loaded' : 'Loading the 3D piece…', accessoryAR?.state === 'error' ? 'error' : 'adjust');
+  if (!status.found) return setStatus(VTO_COPY[vtoTarget()].search);
+  if (!status.ready) return setStatus(status.guidance, 'adjust');
+  if (!locked) return setStatus('Hold still…', 'adjust');
+  const t = vtoTarget(), away = pose && pose.dialFacing < -.35;
+  if (t === 'wrist' && away) return setStatus(vtoCategory === 'watches' ? 'Turn your wrist to see the dial' : 'Turn your wrist toward the camera', 'locked');
+  if (t === 'finger' && away) return setStatus('Turn your hand to see the stone', 'locked');
+  setStatus(vtoAutoCapture && vtoAutoCount < 6 ? 'Looking good · turn for more angles' : 'Looking good · move naturally', 'locked');
+}
+
+// ---------- Photos ----------
+function isNewView(sig) {
+  if (!sig) return false; if (!vtoLastSig) return true;
+  if (sig.type === 'normal' && vtoLastSig.type === 'normal') return Math.acos(Math.max(-1, Math.min(1, sig.x * vtoLastSig.x + sig.y * vtoLastSig.y + sig.z * vtoLastSig.z))) > Math.PI / 6;
+  if (sig.type === 'angle' && vtoLastSig.type === 'angle') return Math.abs(((sig.value - vtoLastSig.value + Math.PI * 3) % (Math.PI * 2)) - Math.PI) > Math.PI / 8;
+  return true;
+}
+function maybeAutoCapture(status, ts) {
+  if (!vtoAutoCapture || vtoAutoCount >= 6 || ts - vtoLastShotAt < 1500 || vtoStable < 10 || !isNewView(status.signature)) return;
+  const video = $('camera'), vw = video.videoWidth, vh = video.videoHeight;
+  let [x1, y1, x2, y2] = status.box; const pad = Math.max(x2 - x1, y2 - y1) * .35;
+  x1 = Math.max(0, (x1 - pad) * vw); y1 = Math.max(0, (y1 - pad) * vh); x2 = Math.min(vw, (x2 + pad) * vw); y2 = Math.min(vh, (y2 + pad) * vh);
+  const canvas = accessoryAR.composite(video, vtoFacingMode === 'user', [x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1)]); if (!canvas) return;
+  vtoLastSig = status.signature; vtoLastShotAt = ts; vtoAutoCount++;
+  addShot(canvas.toDataURL('image/jpeg', .9), 'Angle ' + vtoAutoCount); toast('New angle saved');
+}
+function captureLook() {
+  const video = $('camera'); if (!vtoLoop || !video.videoWidth) return;
+  const canvas = accessoryAR ? accessoryAR.composite(video, vtoFacingMode === 'user') : null; if (!canvas) return;
+  const flash = $('flash'); flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go'); navigator.vibrate?.(20);
+  addShot(canvas.toDataURL('image/jpeg', .92), 'Photo'); toast('Photo saved');
+}
+function addShot(url, label) { vtoShots.unshift({ url, label, product: vtoSelected?.name || '' }); renderShots(); }
+function renderShots() {
+  $('vtoViewCount').textContent = vtoShots.length || '';
+  $('vtoShots').innerHTML = vtoShots.map((s, i) => `<button class="shot" onclick="openLook(${i})" aria-label="Open ${esc(s.label)}"><img src="${s.url}" alt=""><small>${esc(s.label)}</small></button>`).join('');
+  $('vtoShotsEmpty').classList.toggle('hidden', vtoShots.length > 0); $('vtoRetake').classList.toggle('hidden', !vtoShots.length);
+  $('vtoGalleryBtn').innerHTML = vtoShots.length ? `<img src="${vtoShots[0].url}" alt="">` : icon('image');
+}
+function clearLooks() { vtoShots = []; vtoLastSig = null; vtoAutoCount = 0; renderShots(); closeDialog('photoDialog'); }
+function openLooks() {
+  if (!vtoShots.length) return toast('Tap the shutter to take a photo');
+  $('photoBody').innerHTML = `<div class="dlg-pad" style="padding:18px"><h3 style="margin:4px 0 14px">Your photos</h3><div class="shots">${vtoShots.map((s, i) => `<button class="shot" onclick="openLook(${i})"><img src="${s.url}" alt=""><small>${esc(s.label)}</small></button>`).join('')}</div>
+    <div class="photo-actions"><button class="btn ghost" onclick="clearLooks()">${icon('trash')}Clear all</button></div></div>`;
+  openDialog('photoDialog');
+}
+function openLook(i) {
+  const s = vtoShots[i]; if (!s) return;
+  $('photoBody').innerHTML = `<img src="${s.url}" alt="${esc(s.label)}"><div class="photo-actions">
+    <a class="btn gold" href="${s.url}" download="juvia-${(s.product || 'try-on').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${i + 1}.jpg">${icon('download')}Save</a>
+    ${navigator.share ? `<button class="btn ghost" onclick="shareLook(${i})">${icon('share')}Share</button>` : ''}
+    <button class="btn ghost" onclick="vtoShots.splice(${i},1);renderShots();closeDialog('photoDialog')">${icon('trash')}Delete</button></div>`;
+  openDialog('photoDialog');
+}
+async function shareLook(i) {
+  try {
+    const s = vtoShots[i], blob = await (await fetch(s.url)).blob(), file = new File([blob], 'juvia-try-on.jpg', { type: 'image/jpeg' });
+    if (navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: s.product || 'Juvia try-on' });
+    else await navigator.share({ title: 'Juvia try-on', text: 'Trying on ' + (s.product || 'a Juvia piece'), url: location.origin });
+  } catch (e) { if (e.name !== 'AbortError') msg('Sharing is not available here'); }
+}

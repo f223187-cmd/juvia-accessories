@@ -1,7 +1,21 @@
-async function review(id) {
-  if(!tok) return msg('Sign in to leave a review'); const rating=Number(prompt('Rating from 1 to 5')); if(!rating)return; const text=prompt('Your review'); if(!text)return;
-  try { await api(`/products/${id}/reviews`,{method:'POST',body:{rating,text}}); msg('Review submitted'); } catch(e) { msg(e.message); }
+let reviewStars = 0;
+function setStars(v) {
+  reviewStars = v;
+  document.querySelectorAll('#starInput button').forEach(b => b.classList.toggle('on', Number(b.dataset.v) <= v));
 }
-async function getReviews(id) {
-  const rows=await api(`/products/${id}/reviews`); $(`reviews${id}`).innerHTML=rows.map(r=>`<p><b>${esc(r.name)}</b> · ${'★'.repeat(r.rating)}<br>${esc(r.text)}</p>`).join('')||'<small>No reviews yet</small>';
+async function loadReviews(id) {
+  try {
+    const rows = await api(`/products/${id}/reviews`);
+    $('reviewList').innerHTML = rows.map(r => `<div class="review"><div class="review-head"><b>${esc(r.name)}</b>${stars(r.rating)}</div><p style="margin:6px 0 0">${esc(r.text)}</p><small class="fine">${new Date(r.created).toLocaleDateString()}</small></div>`).join('') || '<p class="fine">No reviews yet. Be the first to share how it looks.</p>';
+  } catch { $('reviewList').innerHTML = '<p class="fine">Reviews are unavailable right now.</p>'; }
+}
+async function submitReview(id) {
+  if (!requireAuth('Sign in to post a review.')) return;
+  const text = $('reviewText').value.trim();
+  if (!reviewStars) return msg('Choose a star rating first.');
+  if (!text) return msg('Write a few words about the piece.');
+  try {
+    await api(`/products/${id}/reviews`, { method: 'POST', body: { rating: reviewStars, text } });
+    toast('Thanks, your review is live'); $('reviewText').value = ''; setStars(0); await loadReviews(id); loadProducts();
+  } catch (e) { msg(e.message); }
 }

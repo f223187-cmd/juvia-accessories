@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.responses import FileResponse
 from typing import Optional
 from pathlib import Path
@@ -9,12 +9,18 @@ router=APIRouter()
 @router.get('/api/products')
 def products(category:Optional[str]=None,q:Optional[str]=None):
     if category: validate_category(category)
-    sql="SELECT p.*, EXISTS(SELECT 1 FROM assets a WHERE a.product_id=p.id AND lower(a.filename) LIKE '%.glb') AS has_3d_asset FROM products p"; args=[]; clauses=['p.published=1']
+    sql=("SELECT p.*, EXISTS(SELECT 1 FROM assets a WHERE a.product_id=p.id AND lower(a.filename) LIKE '%.glb') AS has_3d_asset,"
+         " (SELECT a.path FROM assets a WHERE a.product_id=p.id AND lower(a.filename) LIKE '%.glb' ORDER BY a.id DESC LIMIT 1) AS asset_path,"
+         " (SELECT ROUND(AVG(r.rating),1) FROM reviews r WHERE r.product_id=p.id) AS avg_rating,"
+         " (SELECT COUNT(*) FROM reviews r WHERE r.product_id=p.id) AS review_count FROM products p"); args=[]; clauses=['p.published=1']
     if category: clauses.append('p.category=?'); args.append(category)
     if q: clauses.append('(p.name LIKE ? OR p.description LIKE ?)'); args.extend([f'%{q}%',f'%{q}%'])
     if clauses: sql+=' WHERE '+' AND '.join(clauses)
     sql+=' ORDER BY p.id DESC'
-    with db() as c: return [dict(r) for r in c.execute(sql,args)]
+    with db() as c: rows=[dict(r) for r in c.execute(sql,args)]
+    for r in rows:
+        path=r.pop('asset_path',None); r['asset_url']='/uploads/'+Path(path).name if path else ''
+    return rows
 @router.get('/api/admin/products')
 def admin_products(u=Depends(admin)):
     with db() as c: return [dict(r) for r in c.execute('SELECT * FROM products ORDER BY id DESC')]
