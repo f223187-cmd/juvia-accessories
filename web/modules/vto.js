@@ -9,7 +9,7 @@ let wristAR=null,wristARPromise=null,vtoHandedness='';
 function vtoIsWristCategory(category=$('vtoProduct').value){return category==='watches'||category==='bracelets';}
 async function getWristAR(){
   if(wristAR)return wristAR;
-  if(!wristARPromise)wristARPromise=import('/modules/vto3d.js?v=2').then(mod=>{wristAR=new mod.WristAR($('vtoCanvas'));return wristAR;}).catch(e=>{wristARPromise=null;throw e;});
+  if(!wristARPromise)wristARPromise=import('/modules/vto3d.js?v=3').then(mod=>{wristAR=new mod.WristAR($('vtoCanvas'));return wristAR;}).catch(e=>{wristARPromise=null;throw e;});
   return wristARPromise;
 }
 function vtoModelReady(){return vtoIsWristCategory()?!!(wristAR?.ready&&wristAR.url&&vtoSelected&&wristAR.productId===vtoSelected.id):$('vtoModel').dataset.productId===String(vtoSelected?.id)&&$('vtoModel').dataset.ready==='true';}
@@ -317,7 +317,7 @@ function renderWristAR(landmarks){
   if(!wristAR||!vtoModelReady()||!landmarks.worldPoints){hideWristAR();return null;}
   if(!placeVtoCanvas())return null;
   const video=$('camera'),tape=vtoMeasurements[$('vtoProduct').value];
-  return wristAR.update({image:landmarks,world:landmarks.worldPoints,width:video.videoWidth,height:video.videoHeight,handedness:landmarks.handedness,tapeInches:tape==null?undefined:Number(tape)});
+  return wristAR.update({video,image:landmarks,world:landmarks.worldPoints,width:video.videoWidth,height:video.videoHeight,handedness:landmarks.handedness,tapeInches:tape==null?undefined:Number(tape)});
 }
 function renderVtoOverlay(task,landmarks){
   if(task.target==='wrist'){$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';return renderWristAR(landmarks);}
@@ -384,7 +384,7 @@ async function vtoScan(runId){
     if(!status.ready&&vtoStable===0)vtoLiveReady=false;
     if(status.ready){
       const modelReady=vtoModelReady();
-      const modelError=vtoModelError(),turnText=task.target==='wrist'&&wristPose&&wristPose.dialFacing<-.35?'You are seeing the strap side; turn the back of your wrist to the camera to see the dial. ':'',liveText=turnText+task.target==='wrist'&&modelError?'Wrist detected, but the 3D model failed to load. Check this product’s GLB asset. ':task.target==='wrist'&&!modelReady?'Wrist tracking is active. Loading the linked 3D model… ':vtoLiveReady?'Live tracking your '+vtoTargetName()+'. Move naturally; the accessory follows. ':'Hold this pose briefly to lock live tracking. ';
+      const modelError=vtoModelError(),turnText=task.target==='wrist'&&wristPose&&wristPose.dialFacing<-.35?'You are seeing the strap side; turn the back of your wrist to the camera to see the dial. ':'',liveText=turnText+(task.target==='wrist'&&modelError?'Wrist detected, but the 3D model failed to load. Check this product’s GLB asset. ':task.target==='wrist'&&!modelReady?'Wrist tracking is active. Loading the linked 3D model… ':vtoLiveReady?'Live tracking your '+vtoTargetName()+'. Move naturally; the accessory follows. ':'Hold this pose briefly to lock live tracking. ');
       const viewText=vtoCapturePaused?'Automatic view capture is paused. ':vtoShots.length+' clear '+vtoTargetName()+' view'+(vtoShots.length===1?'':'s')+' saved. Turn slowly for a new angle. ';
       const measurement=vtoMeasurements[$('vtoProduct').value];
       $('vtoStep').textContent=liveText+viewText+(measurement?'Soft-tape reading: '+measurement+' in.':'For a true circumference, enter a soft-tape reading below.');

@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
-import {solveWristPose,OneEuro} from './wristpose.js?v=2';
+import {solveWristPose,chiralityEvidence,detectForearm,OneEuro} from './wristpose.js?v=3';
 
 const smooth=t=>t<=0?0:t>=1?1:t*t*(3-2*t);
 const ramp=(v,a,b)=>smooth((v-a)/(b-a));
@@ -29,6 +29,11 @@ export class WristAR{
     this.fx=new OneEuro(1.6,.012);this.fy=new OneEuro(1.6,.012);this.fs=new OneEuro(1,.6);
     this.q=new THREE.Quaternion();this.hasPose=false;this.lastSeen=0;this.videoW=1;this.videoH=1;
     this.lastPose=null;
+    // Back-of-hand side, accumulated over frames so one ambiguous (flat-hand) frame cannot flip the watch.
+    this.chirality=0;
+    // Forearm found from skin colour in a small copy of the frame.
+    this.sample=document.createElement('canvas');this.sampleCtx=null;this.frameNo=0;
+    this.forearm=null;this.forearmSeen=0;this.fa=new OneEuro(1.2,.02);this.fcx=new OneEuro(1.4,.01);this.fcy=new OneEuro(1.4,.01);this.fw=new OneEuro(.6,.002);
   }
   get ready(){return this.state==='ready';}
   async load(url){
@@ -102,8 +107,9 @@ export class WristAR{
     const fittedB=this.strap?B*sz:B;
     // Wrist centre → group origin.
     this.content.position.set(0,-cy,-(top-fittedB));
-    this.occluder.scale.set(.15,size.width/2,size.thickness/2);
-    this.occluder.position.set(-.045,cy,top-fittedB);
+    // Forearm stand-in, centred on the watch: the crown may face either the hand or the elbow.
+    this.occluder.scale.set(.12,size.width/2,size.thickness/2);
+    this.occluder.position.set(0,cy,top-fittedB);
   }
   resize(displayW,displayH,videoW,videoH){
     const dpr=Math.min(2,window.devicePixelRatio||1),w=Math.max(1,Math.round(displayW*dpr)),h=Math.max(1,Math.round(displayH*dpr));
@@ -113,9 +119,39 @@ export class WristAR{
       Object.assign(this.camera,{left:0,right:videoW,top:0,bottom:-videoH});this.camera.updateProjectionMatrix();
     }
   }
+  readForearm(video,image,now){
+    if(!video?.videoWidth)return null;
+    if(this.frameNo++%2===0){
+      const w=160,h=Math.max(16,Math.round(w*video.videoHeight/video.videoWidth));
+      if(this.sample.width!==w||this.sample.height!==h){this.sample.width=w;this.sample.height=h;this.sampleCtx=null;}
+      this.sampleCtx??=this.sample.getContext('2d',{willReadFrequently:true});
+      let found=null;
+      try{this.sampleCtx.drawImage(video,0,0,w,h);found=detectForearm(this.sampleCtx.getImageData(0,0,w,h).data,w,h,image);}catch{}
+      if(found){
+        const W={x:image[0].x*video.videoWidth,y:image[0].y*video.videoHeight};
+        if(now-this.forearmSeen>500){this.fa.reset();this.fcx.reset();this.fcy.reset();this.fw.reset();}
+        let angle=Math.atan2(found.dir.y,found.dir.x);
+        if(this.forearm){const prev=this.forearm.angle;angle=prev+Math.atan2(Math.sin(angle-prev),Math.cos(angle-prev));}
+        const next={angle:this.fa.filter(angle,now)};
+        if(found.centre){
+          // Track the centre relative to the wrist landmark so it moves with the hand between detections.
+          next.dx=this.fcx.filter(found.centre.x*video.videoWidth-W.x,now);next.dy=this.fcy.filter(found.centre.y*video.videoHeight-W.y,now);
+          next.widthPx=this.fw.filter(found.widthPx*video.videoWidth/found.frameW,now);
+        }
+        this.forearm=next;this.forearmSeen=now;
+      }
+    }
+    if(!this.forearm||now-this.forearmSeen>450){this.forearm=null;return null;}
+    const f=this.forearm,W={x:image[0].x*video.videoWidth,y:image[0].y*video.videoHeight},out={dir:{x:Math.cos(f.angle),y:Math.sin(f.angle)}};
+    if(f.widthPx){out.centre={x:(W.x+f.dx)/video.videoWidth,y:(W.y+f.dy)/video.videoHeight};out.widthPx=f.widthPx;out.frameW=video.videoWidth;}
+    return out;
+  }
   update(input,now=performance.now()){
     if(!this.ready||!this.content)return null;
-    const pose=solveWristPose(input);
+    if(now-this.lastSeen>1500)this.chirality=0;
+    this.chirality=Math.max(-12,Math.min(12,this.chirality*.9+chiralityEvidence(input.world,input.handedness)));
+    const forearm=this.readForearm(input.video,input.image,now);
+    const pose=solveWristPose({...input,right:this.chirality>=0,forearm});
     if(!pose){this.miss(now);return null;}
     this.fit(pose.size);
     const {X,Y,Z}=pose.axes,toThree=v=>new THREE.Vector3(v.x,-v.y,-v.z);
