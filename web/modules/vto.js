@@ -5,6 +5,24 @@ let vtoProducts=[],vtoSelected=null,vtoOverlayState=null;
 let vtoFacingMode='user';
 let vtoRunId=0;
 let vtoFrameWaitSince=0;
+let wristAR=null,wristARPromise=null,vtoHandedness='';
+function vtoIsWristCategory(category=$('vtoProduct').value){return category==='watches'||category==='bracelets';}
+async function getWristAR(){
+  if(wristAR)return wristAR;
+  if(!wristARPromise)wristARPromise=import('/modules/vto3d.js?v=2').then(mod=>{wristAR=new mod.WristAR($('vtoCanvas'));return wristAR;}).catch(e=>{wristARPromise=null;throw e;});
+  return wristARPromise;
+}
+function vtoModelReady(){return vtoIsWristCategory()?!!(wristAR?.ready&&wristAR.url&&vtoSelected&&wristAR.productId===vtoSelected.id):$('vtoModel').dataset.productId===String(vtoSelected?.id)&&$('vtoModel').dataset.ready==='true';}
+function vtoModelError(){return vtoIsWristCategory()?(wristAR?.state==='error'&&wristAR.productId===vtoSelected?.id?wristAR.error||'load':''):$('vtoModel').dataset.error;}
+function hideWristAR(){if(wristAR)wristAR.hide();const c=$('vtoCanvas');if(c)c.style.visibility='hidden';}
+function placeVtoCanvas(){
+  const video=$('camera'),canvas=$('vtoCanvas'),rect=video.getBoundingClientRect(),wrap=video.parentElement.getBoundingClientRect();
+  const vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh||!rect.width||!rect.height)return false;
+  const fit=getComputedStyle(video).objectFit,scale=fit==='cover'?Math.max(rect.width/vw,rect.height/vh):Math.min(rect.width/vw,rect.height/vh);
+  const w=vw*scale,h=vh*scale,left=rect.left-wrap.left+(rect.width-w)/2,top=rect.top-wrap.top+(rect.height-h)/2;
+  Object.assign(canvas.style,{left:left+'px',top:top+'px',width:w+'px',height:h+'px',transform:vtoFacingMode==='user'?'scaleX(-1)':'none',visibility:'visible'});
+  wristAR.resize(w,h,vw,vh);return true;
+}
 const VTO_MODEL_BASE='https://storage.googleapis.com/mediapipe-models/';
 const VTO_WASM='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm';
 
@@ -162,7 +180,7 @@ async function loadVtoProducts(){
 }
 async function setVtoItem(){
   const id=Number($('vtoItem').value);vtoSelected=vtoProducts.find(p=>p.id===id)||null;
-  vtoOverlayState=null;
+  vtoOverlayState=null;hideWristAR();
   const overlay=$('vtoOverlay'),model=$('vtoModel');overlay.style.display='none';model.style.display='none';model.style.opacity='0';model.removeAttribute('src');model.dataset.ready='false';model.dataset.error='';model.dataset.productId='';clearVtoOcclusion();
   if(!vtoSelected){overlay.removeAttribute('src');$('vtoStep').textContent='Choose a product with an image or linked 3D model.';return;}
   if(vtoSelected.image)overlay.src=vtoSelected.image;
@@ -170,6 +188,14 @@ async function setVtoItem(){
   try{
     const productId=vtoSelected.id,asset=await api('/products/'+productId+'/asset');
     if(vtoSelected?.id!==productId)return;
+    if(vtoIsWristCategory()){
+      const ar=await getWristAR();if(vtoSelected?.id!==productId)return;
+      ar.productId=productId;hideWristAR();
+      $('vtoStep').textContent='Loading the 3D '+(vtoSelected.category==='bracelets'?'bracelet':'watch')+' model…';
+      try{await ar.load(asset.url);if(vtoSelected?.id===productId&&!vtoLoop)$('vtoStep').textContent='3D model ready. Start live try-on to locate the '+vtoTargetName()+'.';}
+      catch{if(vtoSelected?.id===productId)$('vtoStep').textContent='This 3D model could not be loaded. Check that the file is a valid GLB.';}
+      return;
+    }
     model.dataset.productId=String(productId);model.addEventListener('load',()=>{if(vtoSelected?.id===productId){model.dataset.ready='true';model.dataset.error='';overlay.style.display='none';if(!vtoLoop)model.style.display='none';}},{once:true});model.addEventListener('error',event=>{if(vtoSelected?.id===productId){model.dataset.error=event.detail?.type||'load';model.dataset.ready='false';model.style.display='none';clearVtoOcclusion();$('vtoStep').textContent='This 3D model could not be loaded. Check that the file is a valid GLB.';}},{once:true});model.style.display='block';model.style.opacity='0';model.style.width='180px';model.style.height='180px';model.setAttribute('src',asset.url);
   }catch{}
 }
@@ -190,6 +216,8 @@ async function startVto(){
     $('vtoStart').disabled=true;$('vtoStart').classList.add('hidden');$('vtoStop').classList.remove('hidden');$('vtoStep').textContent='Checking the selected product and preparing your camera…';
     vtoLoop=false;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();setVtoGuideValidity(false);
     if(!vtoProducts.length)await loadVtoProducts();
+    if(runId!==vtoRunId)return;
+    if(vtoIsWristCategory()&&vtoSelected&&!vtoModelReady()&&!vtoModelError())await setVtoItem();
     if(runId!==vtoRunId)return;
     if(!await hasVtoPreview(vtoSelected))throw new Error('Live AR needs a linked 3D GLB model. A flat catalogue image cannot follow or rotate with your wrist.');
     if(runId!==vtoRunId)return;
@@ -253,6 +281,7 @@ function frameStatus(task,timestamp){
     }
   }else{
     const result=handLandmarker.detectForVideo($('camera'),timestamp);rawPoints=result.landmarks?.[0]||[];
+    const hand=(result.handedness||result.handednesses)?.[0]?.[0];if(hand?.categoryName)vtoHandedness=hand.categoryName;
     if(rawPoints.length===21){
       found=true;const xs=rawPoints.map(p=>p.x),ys=rawPoints.map(p=>p.y),span=Math.max(Math.max(...xs)-Math.min(...xs),Math.max(...ys)-Math.min(...ys));
       if(task.target==='finger'){
@@ -276,7 +305,7 @@ function frameStatus(task,timestamp){
         const a={x:points[5].x-points[0].x,y:points[5].y-points[0].y,z:points[5].z-points[0].z},b={x:points[17].x-points[0].x,y:points[17].y-points[0].y,z:points[17].z-points[0].z};
         const normal={x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x},length=Math.hypot(normal.x,normal.y,normal.z)||1;
         const palmNormal={x:normal.x/length,y:normal.y/length,z:normal.z/length};landmarks.palmNormal=palmNormal;signature={type:'normal',...palmNormal};
-        if(worldPoints){landmarks.worldPoints=worldPoints;landmarks.worldProjection=estimateHandProjection(rawPoints,worldPoints,$('camera').videoWidth,$('camera').videoHeight);}
+        if(worldPoints){landmarks.worldPoints=worldPoints.map(p=>({x:p.x,y:p.y,z:p.z}));landmarks.handedness=vtoHandedness;}
       }
       landmarks.signature=signature;
     }
@@ -284,7 +313,14 @@ function frameStatus(task,timestamp){
   if(task.target==='neck'&&landmarks.length)landmarks.signature=signature;
   return {found,ready,guidance,landmarks,signature};
 }
+function renderWristAR(landmarks){
+  if(!wristAR||!vtoModelReady()||!landmarks.worldPoints){hideWristAR();return null;}
+  if(!placeVtoCanvas())return null;
+  const video=$('camera'),tape=vtoMeasurements[$('vtoProduct').value];
+  return wristAR.update({image:landmarks,world:landmarks.worldPoints,width:video.videoWidth,height:video.videoHeight,handedness:landmarks.handedness,tapeInches:tape==null?undefined:Number(tape)});
+}
 function renderVtoOverlay(task,landmarks){
+  if(task.target==='wrist'){$('vtoOverlay').style.display='none';$('vtoModel').style.display='none';return renderWristAR(landmarks);}
   const video=$('camera'),rect=video.getBoundingClientRect(),model=$('vtoModel'),useModel=model.dataset.productId===String(vtoSelected?.id)&&model.dataset.ready==='true',overlay=model;
   if(!useModel||landmarks.length<2||!rect.width||!rect.height){$('vtoOverlay').style.display='none';model.style.opacity='0';model.style.display='none';vtoOverlayState=null;return;}
   const sourceWidth=video.videoWidth||rect.width,sourceHeight=video.videoHeight||rect.height,fit=getComputedStyle(video).objectFit;
@@ -338,7 +374,8 @@ async function vtoScan(runId){
     }
     vtoFrameWaitSince=0;const timestamp=Math.max(performance.now(),vtoLastTimestamp+1);vtoLastTimestamp=timestamp;
     let status;try{status=frameStatus(task,timestamp);}catch(e){stopVto();$('vtoStep').textContent='Landmark tracking stopped: '+e.message;return;}
-    if(status.found){renderVtoOverlay(task,status.landmarks);if(task.target==='wrist'&&$('vtoModel').dataset.ready==='true')renderVtoOcclusion(status.landmarks,timestamp);else clearVtoOcclusion();}else{const model=$('vtoModel');model.style.opacity='0';model.style.display='none';$('vtoOverlay').style.display='none';clearVtoOcclusion();}
+    let wristPose=null;
+    if(status.found){wristPose=renderVtoOverlay(task,status.landmarks);clearVtoOcclusion();}else{const model=$('vtoModel');model.style.opacity='0';model.style.display='none';$('vtoOverlay').style.display='none';clearVtoOcclusion();if(wristAR)wristAR.miss();}
     const detectionKey=status.ready?task.target:'';
     if(detectionKey&&detectionKey!==vtoLastDetected)vtoToast(vtoTargetLabel()+' detected');vtoLastDetected=detectionKey;
     vtoStable=status.ready?Math.min(vtoStable+1,30):0;
@@ -346,8 +383,8 @@ async function vtoScan(runId){
     if(status.ready&&vtoStable>=8)vtoLiveReady=true;
     if(!status.ready&&vtoStable===0)vtoLiveReady=false;
     if(status.ready){
-      const modelReady=$('vtoModel').dataset.productId===String(vtoSelected?.id)&&$('vtoModel').dataset.ready==='true';
-      const modelError=$('vtoModel').dataset.error,liveText=task.target==='wrist'&&modelError?'Wrist detected, but the 3D model failed to load. Check this product’s GLB asset. ':task.target==='wrist'&&!modelReady?'Wrist tracking is active. Loading the linked 3D model… ':vtoLiveReady?'Live tracking your '+vtoTargetName()+'. Move naturally; the accessory follows. ':'Hold this pose briefly to lock live tracking. ';
+      const modelReady=vtoModelReady();
+      const modelError=vtoModelError(),turnText=task.target==='wrist'&&wristPose&&wristPose.dialFacing<-.35?'You are seeing the strap side; turn the back of your wrist to the camera to see the dial. ':'',liveText=turnText+task.target==='wrist'&&modelError?'Wrist detected, but the 3D model failed to load. Check this product’s GLB asset. ':task.target==='wrist'&&!modelReady?'Wrist tracking is active. Loading the linked 3D model… ':vtoLiveReady?'Live tracking your '+vtoTargetName()+'. Move naturally; the accessory follows. ':'Hold this pose briefly to lock live tracking. ';
       const viewText=vtoCapturePaused?'Automatic view capture is paused. ':vtoShots.length+' clear '+vtoTargetName()+' view'+(vtoShots.length===1?'':'s')+' saved. Turn slowly for a new angle. ';
       const measurement=vtoMeasurements[$('vtoProduct').value];
       $('vtoStep').textContent=liveText+viewText+(measurement?'Soft-tape reading: '+measurement+' in.':'For a true circumference, enter a soft-tape reading below.');
@@ -371,6 +408,6 @@ function retakeVto(){
   $('vtoStep').textContent='View collection restarted. Keep the '+vtoTargetName()+' in the guide; live tracking continues.';
 }
 function stopCameraStream(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}$('camera').srcObject=null;}
-function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();clearVtoOcclusion();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoFinish').classList.add('hidden');$('vtoFinish').disabled=false;$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');$('vtoStart').disabled=false;setVtoGuideValidity(false);}
+function stopVto(){vtoLoop=false;vtoRunId++;vtoOverlayState=null;vtoFrameWaitSince=0;stopCameraStream();clearVtoOcclusion();hideWristAR();$('vtoOverlay').style.display='none';$('vtoModel').style.opacity='0';$('vtoModel').style.display='none';$('vtoRetake').classList.add('hidden');$('vtoFinish').classList.add('hidden');$('vtoFinish').disabled=false;$('vtoSwitch').classList.add('hidden');$('vtoStop').classList.add('hidden');$('vtoStart').classList.remove('hidden');$('vtoStart').disabled=false;setVtoGuideValidity(false);}
 async function startCamera(){return startVto();}
 async function capture(){return startVto();}
