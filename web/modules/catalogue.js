@@ -54,6 +54,7 @@ async function openProduct(id) {
       <div>${stars(p.avg_rating, p.review_count)}</div>
       <div class="pd-price">${money(p.price)}</div>
       <p class="muted">${esc(p.description) || 'A Juvia piece.'}</p>
+      <div class="field" style="margin-top:6px">Size<div id="pdSizes">${sizeChips(p,'pickProductSize')}</div></div>
       <div class="pd-actions">
         ${p.has_3d_asset ? `<button class="btn primary" onclick="closeDialog('productDialog');chooseVtoProduct(${p.id},'${p.category}')">${icon('camera')}Try it on live</button>` : ''}
         <button class="btn ghost" onclick="document.getElementById('reviewForm').scrollIntoView({behavior:'smooth'})">${icon('star')}Write a review</button>
@@ -120,4 +121,7 @@ async function deleteProduct(id) {
   if (!confirm('Delete this product and its reviews?')) return;
   try { await api('/products/' + id, { method: 'DELETE' }); if (editingProductId === id) resetProductForm(); toast('Product deleted'); await Promise.all([loadAdminProducts(), loadAssets(), loadAnalytics(), loadProducts()]); }
   catch (e) { msg(e.message); }
+}
+function pickProductSize(id, size) {
+  chosenSize[id] = size; const p = shopRows.find(r => r.id === id); if (p) $('pdSizes').innerHTML = sizeChips(p, 'pickProductSize');
 }

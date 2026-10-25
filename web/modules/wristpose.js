@@ -110,11 +110,48 @@ export function handScale(image,world,cam,width,height){
 
 // Wrist cross-section (metres): a soft-tape reading wins, then the measured forearm silhouette, then an
 // adult average. Thickness (back of wrist to palm side) is ~0.72 of the side-to-side width.
+// Because the scale already comes from the user's own hand, the hand-based width is close (within ~10%) on
+// real frames; a silhouette that disagrees by more than -20%/+25% has picked up background (a skin-coloured
+// curtain, door or floor) and is ignored rather than clamped, so it can never balloon the strap.
+const WRIST_WIDTH=.056,WRIST_PERIMETER=2.72; // perimeter of a w × 0.72w ellipse ≈ 2.72 w
 export function wristSize(tapeInches,measuredWidth){
-  let width=.056;
-  if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/2.67; // ellipse w × 0.72w ≈ 2.67w perimeter
-  else if(Number.isFinite(measuredWidth))width=clamp(measuredWidth,.042,.074);
-  return {width,thickness:width*.72};
+  let width=WRIST_WIDTH;
+  if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/WRIST_PERIMETER;
+  else if(Number.isFinite(measuredWidth)){const r=measuredWidth/WRIST_WIDTH;if(r>.8&&r<1.25)width=WRIST_WIDTH*clamp(r,.88,1.15);}
+  return {width,thickness:width*.72,circumference:width*WRIST_PERIMETER};
+}
+
+// ---------- Product sizes (S / M / L) ----------
+// Each size changes the real geometry of the piece; fitFor() compares it with the body part so the try-on
+// can show and say how it fits. Units: metres (case diameter, inner circumference, inner diameter, chain length).
+export const SIZE_CHART={
+  watches:{base:.040,sizes:{S:.036,M:.040,L:.044}},      // case diameter; the strap is adjustable and always fitted
+  bracelets:{sizes:{S:.165,M:.180,L:.195}},             // bangle inner circumference
+  rings:{sizes:{S:.01653,M:.01814,L:.01976}},          // inner diameter: US 6, 8, 10
+  necklaces:{base:.4572,sizes:{S:.4064,M:.4572,L:.508}},// chain length: 16, 18, 20 inches
+};
+// Bangle inner oval with a 0.8 height/width ratio and the given perimeter: semi-axes along the wrist's width / thickness.
+export function bangleAxes(circumference){const a=circumference/(Math.PI*(3*1.8-Math.sqrt(3.8*3.4)));return {a,b:.8*a};}
+export function fitFor(category,size,body={}){
+  const v=SIZE_CHART[category]?.sizes[size];if(!v)return null;
+  if(category==='watches'){
+    const wrist=body.wristWidth||WRIST_WIDTH,ratio=v/wrist;
+    return {fit:'fits',ratio,label:ratio>.8?'Bold on your wrist':ratio<.66?'Petite on your wrist':'Classic fit'};
+  }
+  if(category==='bracelets'){
+    // A bangle must pass over the hand: ~2 cm more than the wrist is a comfortable, close fit.
+    const room=v-(body.wristCircumference||WRIST_WIDTH*WRIST_PERIMETER);
+    return {fit:room<.01?'tight':room>.035?'loose':'fits',room,label:room<.01?'Too small to slip over your hand':room>.035?'Loose, slides on your wrist':'Comfortable fit'};
+  }
+  if(category==='rings'){
+    const gap=v-(body.fingerDiameter||.0173);
+    return {fit:gap<-.0004?'tight':gap>.0009?'loose':'fits',gap,label:gap<-.0004?'Too small for your finger':gap>.0009?'Loose, may spin':'Snug fit'};
+  }
+  if(category==='necklaces'){
+    const drop=(v-SIZE_CHART.necklaces.base)/2;
+    return {fit:'fits',drop,label:v<.43?'Sits at the base of the neck':v>.48?'Falls to the upper chest':'Rests on the collarbone'};
+  }
+  return null;
 }
 
 // ---------- Forearm from the camera image ----------

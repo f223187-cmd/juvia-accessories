@@ -32,11 +32,13 @@ def init():
         seed_demo_products(c)
 DEMO_PRODUCTS=[
     # (source key, model file, name, category, price, description, legacy name)
-    ('bundled-vto-watch','juvia-watch.glb','Heritage Moonphase Watch','watches',249,'Polished steel case, midnight dial with moonphase sub-dial and a cognac leather strap. 42 mm, made for everyday wear.','Watch VTO demo'),
+    ('bundled-vto-watch','juvia-watch.glb','Heritage Moonphase Watch','watches',249,'Polished steel case in 36, 40 or 44 mm with a midnight moonphase dial and a cognac leather strap that adjusts to your wrist.','Watch VTO demo'),
     ('bundled-vto-bracelet','juvia-bracelet.glb','Rosé Cable Bangle','bracelets',129,'Twisted rose-gold cable bangle with a softly oval profile that sits comfortably on the wrist bone.',None),
     ('bundled-vto-ring','juvia-ring.glb','Aurora Solitaire Ring','rings',189,'Four-prong solitaire in polished yellow gold with a brilliant-cut 6 mm stone on a slim comfort-fit band.',None),
     ('bundled-vto-necklace','juvia-necklace.glb','Emerald Drop Necklace','necklaces',159,'Fine gold chain with a faceted emerald drop that rests just below the collarbone.',None),
 ]
+# Seeded descriptions that predate S/M/L sizes; refreshed in place (admin-edited text is left alone).
+OUTDATED_DESCRIPTIONS={'Polished steel case, midnight dial with moonphase sub-dial and a cognac leather strap. 42 mm, made for everyday wear.'}
 def seed_demo_products(c):
     for source,model,name,category,price,description,legacy in DEMO_PRODUCTS:
         if not (ROOT/'web'/'assets'/'models'/model).is_file(): continue
@@ -46,7 +48,8 @@ def seed_demo_products(c):
             product_id=cur.lastrowid
         else:
             product_id=product['id']
-            if legacy and product['name']==legacy: c.execute('UPDATE products SET name=?,price=?,description=? WHERE id=?',(name,price,description,product_id))
+            if (legacy and product['name']==legacy) or c.execute('SELECT description FROM products WHERE id=?',(product_id,)).fetchone()[0] in OUTDATED_DESCRIPTIONS:
+                c.execute('UPDATE products SET name=?,price=?,description=? WHERE id=?',(name,price,description,product_id))
         if not c.execute('SELECT id FROM assets WHERE product_id=?',(product_id,)).fetchone():
             c.execute('INSERT INTO assets(product_id,filename,path,created) VALUES(?,?,?,?)',(product_id,model,'bundled/'+model,datetime.now(timezone.utc).isoformat()))
 init()

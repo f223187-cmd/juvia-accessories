@@ -30,6 +30,19 @@ const CATEGORY = {
   rings: { label: 'Rings', one: 'Ring', icon: 'ring', target: 'Ring finger', blurb: 'Solitaires and everyday bands' },
   necklaces: { label: 'Necklaces', one: 'Necklace', icon: 'necklace', target: 'Neck', blurb: 'Pendants and fine chains' },
 };
+// S / M / L for every piece (the geometry for each size lives in wristpose.js SIZE_CHART).
+const SIZES = {
+  watches: [['S', '36 mm case'], ['M', '40 mm case'], ['L', '44 mm case']],
+  bracelets: [['S', '16.5 cm inside'], ['M', '18 cm inside'], ['L', '19.5 cm inside']],
+  rings: [['S', 'US 6 · 16.5 mm'], ['M', 'US 8 · 18.1 mm'], ['L', 'US 10 · 19.8 mm']],
+  necklaces: [['S', '16 in chain'], ['M', '18 in chain'], ['L', '20 in chain']],
+};
+const chosenSize = {};
+const sizeOf = p => chosenSize[p?.id] || 'M';
+function sizeChips(p, handler, cls = '') {
+  return `<div class="sizes ${cls}" role="radiogroup" aria-label="Size">${(SIZES[p.category] || []).map(([s, detail]) =>
+    `<button type="button" role="radio" aria-checked="${sizeOf(p) === s}" class="${sizeOf(p) === s ? 'active' : ''}" onclick="${handler}(${p.id},'${s}')"><b>${s}</b><small>${esc(detail)}</small></button>`).join('')}</div>`;
+}
 function stars(rating, count) {
   const r = Math.round(Number(rating || 0));
   return `<span class="stars" aria-label="${rating ? rating + ' out of 5' : 'No ratings yet'}">${[1,2,3,4,5].map(i => `<svg class="i fill ${i <= r ? '' : 'off'}"><use href="#i-star"/></svg>`).join('')}</span>` +

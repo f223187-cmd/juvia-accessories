@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
-import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro} from './wristpose.js?v=6';
+import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro,SIZE_CHART,bangleAxes} from './wristpose.js?v=7';
 
 const smooth=t=>t<=0?0:t>=1?1:t*t*(3-2*t);
 const ramp=(v,a,b)=>smooth((v-a)/(b-a));
@@ -63,7 +63,7 @@ export class AccessoryAR{
     this.camera=new THREE.OrthographicCamera(0,1,0,-1,1,100000);this.camera.position.set(0,0,50000);
     this.anchor=new THREE.Group();this.anchor.visible=false;this.scene.add(this.anchor);
     this.contactMap=contactTexture();this.blobMap=radialTexture();
-    this.kind='watch';this.content=null;this.model=null;this.strap=null;this.loop=null;this.fitKey='';this.body=null;this.extraOccluders=[];
+    this.kind='watch';this.variant=null;this.neck=null;this.hang=null;this.content=null;this.model=null;this.strap=null;this.loop=null;this.fitKey='';this.body=null;this.extraOccluders=[];
     this.state='empty';this.error='';this.url='';
     this.fx=new OneEuro(1.6,.012);this.fy=new OneEuro(1.6,.012);this.fs=new OneEuro(1,.6);
     this.q=new THREE.Quaternion();this.hasPose=false;this.lastSeen=0;this.videoW=1;this.videoH=1;this.lastPose=null;
@@ -87,7 +87,7 @@ export class AccessoryAR{
   }
   clearModel(){
     if(this.content){this.anchor.remove(this.content);this.content.traverse(o=>{o.geometry?.dispose();});}
-    this.content=null;this.model=null;this.strap=null;this.loop=null;this.fitKey='';this.body=null;this.extraOccluders=[];this.anchor.visible=false;
+    this.content=null;this.model=null;this.strap=null;this.loop=null;this.fitKey='';this.body=null;this.neck=null;this.hang=null;this.extraOccluders=[];this.anchor.visible=false;
   }
   // Bake every node transform into its geometry so the whole model lives in one metric space.
   bake(root){
@@ -143,6 +143,9 @@ export class AccessoryAR{
       const low=new THREE.Box3().setFromObject(model),pend=new THREE.Vector3((low.min.x+low.max.x)/2,low.min.y+.012,low.max.z-.012);
       const blob=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({color:0x140c08,transparent:true,opacity:.28,alphaMap:this.blobMap,depthWrite:false}));
       blob.scale.set(.03,.036,1);blob.position.set(pend.x,pend.y-.002,pend.z-.006);blob.renderOrder=2;content.add(blob);
+      const pendant=model.children.find(c=>/pendant|stone|gem/i.test(c.name))||null,pb=pendant&&new THREE.Box3().setFromObject(pendant);
+      this.neck={meshes:model.children.map(mesh=>({mesh,base:Float32Array.from(mesh.geometry.attributes.position.array)})),pendant,
+        pendantTop:pb?pb.max.y+.004:low.min.y+.02,depth:Math.max(.05,pb?-(pb.max.y+.004):-low.min.y),blob,blobY:blob.position.y};
       body.scale.set(.058,.16,.052);body.position.set(0,.055,0);
     }else if(this.kind==='ring'||this.kind==='bracelet'){
       if(!/juvia-(ring|bracelet)\.glb/i.test(this.url))this.orientLoop(model,this.kind==='ring');
@@ -175,30 +178,43 @@ export class AccessoryAR{
     this.loop=loop;
   }
   // Re-shape the accessory for this body part (only when the size changes noticeably).
+  // Chosen product size (S/M/L). Re-fits on the next frame.
+  setSize(category,size){this.variant=SIZE_CHART[category]?.sizes[size]?{category,size,value:SIZE_CHART[category].sizes[size]}:null;this.fitKey='';}
+  // Shape the accessory for this body part and the chosen size (only when either changes noticeably).
   fit(size){
     if(!this.loop&&this.kind!=='necklace')return;
-    const key=JSON.stringify(Object.values(size).map(v=>Math.round(v*2000)));if(key===this.fitKey)return;this.fitKey=key;
+    const v=this.variant?.value;
+    const key=JSON.stringify([...Object.values(size).map(n=>Math.round(n*2000)),v]);if(key===this.fitKey)return;this.fitKey=key;
     const {occluder,shadow,contact}=this.body;
-    if(this.kind==='necklace')return;
+    if(this.kind==='necklace'){this.fitNecklace(v?(v-SIZE_CHART.necklaces.base)/2:0);return;}
     if(this.kind==='ring'){
-      const r=size.diameter/2,k=(r+.0002)/this.loop.inner;
-      this.model.scale.setScalar(clamp(k,.7,1.45));this.content.position.set(0,0,0);
+      // The ring's inner diameter is the chosen size; the finger keeps its own size. A larger ring rests on the
+      // back of the finger (gravity on a raised hand), so the gap shows on the palm side and at the edges.
+      const r=size.diameter/2,ri=Math.max(v?v/2:r+.0002,r+.0001),k=ri/this.loop.inner;
+      this.model.scale.setScalar(clamp(k,.6,1.6));this.model.position.set(0,0,0);this.content.position.set(0,0,0);
+      this.hang={a:ri,b:ri,w:r,t:r*.92};
       occluder.scale.set(.05,r,r*.92);occluder.position.set(0,0,0);
-      const band=(this.loop.box.max.x-this.loop.box.min.x)*this.model.scale.x;
-      shadow.scale.set(.03,r+.00025,r*.92+.00025);contact.scale.set(band+.004,r+.0003,r*.92+.0003);
+      const band=(this.loop.box.max.x-this.loop.box.min.x)*this.model.scale.x,tight=ri-r<.0006;
+      shadow.scale.set(.03,r+.00025,r*.92+.00025);contact.scale.set(band+.004,r+.0003,r*.92+.0003);contact.visible=tight;
       return;
     }
     if(this.kind==='bracelet'){
       const W=size.width/2,T=size.thickness/2,b=this.loop.box,ay=(b.max.y-b.min.y)/2,az=(b.max.z-b.min.z)/2,tube=b.max.x-b.min.x;
-      // A bangle rests loosely: ~3 mm clearance, sitting on the back of the wrist under gravity is ignored.
-      const sy=clamp((W+.003+tube)/ay,.7,1.4),sz=clamp((T+.003+tube)/az,.7,1.5);
-      this.model.scale.set(1,sy,sz);this.content.position.set(0,0,0);
+      // Inner oval from the chosen inner circumference (never smaller than the wrist itself). A loose bangle
+      // rests on the back of the wrist, so the extra room hangs toward the palm side.
+      let {a,b:bb}=v?bangleAxes(v):{a:W+.003,b:T+.003};a=Math.max(a,W+.0008);bb=Math.max(bb,T+.0008);
+      this.model.scale.set(1,clamp((a+tube)/ay,.6,1.8),clamp((bb+tube)/az,.6,1.8));this.model.position.set(0,0,0);this.content.position.set(0,0,0);
+      this.hang={a,b:bb,w:W+.0008,t:T+.0008};
       occluder.scale.set(.12,W,T);occluder.position.set(0,0,0);
-      shadow.scale.set(.06,W+.0003,T+.0003);contact.scale.set(tube+.008,W+.00035,T+.00035);contact.material.uniforms.opacity.value=.3;
+      const touching=bb-T<.004;
+      shadow.scale.set(.06,W+.0003,T+.0003);contact.scale.set(tube+.008,W+.00035,T+.00035);contact.material.uniforms.opacity.value=touching?.3:.12;
       return;
     }
-    const {cy,top,A,B,bandWidth}=this.loop,gap=.0008,A2=size.width/2+gap,B2=size.thickness/2+gap;
-    const sy=clamp(A2/A,.65,1.35),sz=clamp(B2/B,.65,1.35);
+    this.hang=null;
+    // Watch: the case grows or shrinks with the chosen size; the strap is always re-shaped to hug this wrist.
+    const k=v?v/SIZE_CHART.watches.base:1;
+    const {cy,top,A,B,bandWidth}=this.loop,gap=.0008,A2=(size.width/2+gap)/k,B2=(size.thickness/2+gap)/k;
+    const sy=clamp(A2/A,.5,1.6),sz=clamp(B2/B,.5,1.6);
     if(this.strap){
       const pos=this.strap.mesh.geometry.attributes.position,base=this.strap.base;
       for(let i=0;i<pos.count;i++){
@@ -209,12 +225,25 @@ export class AccessoryAR{
       pos.needsUpdate=true;this.strap.mesh.geometry.computeBoundingSphere();this.strap.mesh.geometry.computeVertexNormals();
     }
     const fittedB=this.strap?B*sz:B;
-    // Wrist centre → group origin.
-    this.model.position.set(0,-cy,-(top-fittedB));
+    // Wrist centre → group origin (model scaled by the case size).
+    this.model.scale.setScalar(k);this.model.position.set(0,-cy*k,-(top-fittedB)*k);
     const W=size.width/2,T=size.thickness/2;
     // Forearm stand-in, centred on the watch: the crown may face either the hand or the elbow.
     occluder.scale.set(.12,W,T);occluder.position.set(0,0,0);
-    shadow.scale.set(.09,W+.0004,T+.0004);contact.scale.set(bandWidth+.008,W+.00045,T+.00045);
+    shadow.scale.set(.09,W+.0004,T+.0004);contact.scale.set(bandWidth*k+.008,W+.00045,T+.00045);
+  }
+  // Chain length: the extra (or missing) length lowers (or raises) the front drop; the pendant moves rigidly.
+  fitNecklace(drop){
+    const n=this.neck;if(!n)return;
+    for(const {mesh,base} of n.meshes){
+      const pos=mesh.geometry.attributes.position;
+      for(let i=0;i<pos.count;i++){
+        const y=base[i*3+1],t=smooth((n.pendantTop-y)/.012),scaled=y<0?y*(1+drop/n.depth):y;
+        pos.setY(i,mesh===n.pendant?y-drop:scaled*(1-t)+(y-drop)*t);
+      }
+      pos.needsUpdate=true;mesh.geometry.computeBoundingSphere();
+    }
+    n.blob.position.y=n.blobY-drop;
   }
   resize(displayW,displayH,videoW,videoH){
     const dpr=Math.min(2,window.devicePixelRatio||1),w=Math.max(1,Math.round(displayW*dpr)),h=Math.max(1,Math.round(displayH*dpr));
@@ -329,10 +358,21 @@ export class AccessoryAR{
     const x=this.fx.filter(pose.x,now),y=this.fy.filter(pose.y,now),s=Math.exp(this.fs.filter(Math.log(pose.scale),now));
     this.anchor.position.set(x,-y,0);this.anchor.quaternion.copy(this.q);this.anchor.scale.setScalar(s);
     this.placeOccluders(pose.occluders);
+    this.applyHang();
     this.placeLight(s);
     this.estimateLight(frame,x/this.videoW,y/this.videoH,now);
     this.anchor.visible=true;this.hasPose=true;this.lastSeen=now;this.lastPose={...pose,x,y,scale:s};
     this.render();return this.lastPose;
+  }
+  // A bangle or ring larger than the body part hangs under gravity: its inner surface rests on the upper side
+  // of the wrist/finger and the spare room shows below. With the phone upright, gravity is "down" in the image.
+  applyHang(){
+    const h=this.hang;if(!h||!this.model)return;
+    const g=new THREE.Vector3(0,-1,0).applyQuaternion(this.q.clone().invert()),m=Math.hypot(g.y,g.z);
+    const uy=m>.25?g.y/m:0,uz=m>.25?g.z/m:-1;
+    // Ellipse support functions: shift so the inner oval touches the body on the side opposite gravity.
+    const d=Math.hypot(h.a*uy,h.b*uz)-Math.hypot(h.w*uy,h.t*uz),ty=uy*Math.max(0,d),tz=uz*Math.max(0,d);
+    const p=this.model.position;p.y+=(ty-p.y)*.35;p.z+=(tz-p.z)*.35;
   }
   // Extra depth-only cylinders (e.g. neighbouring fingers) given in camera-aligned metres around the anchor.
   placeOccluders(list=[]){

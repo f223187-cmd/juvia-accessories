@@ -23,7 +23,7 @@ let vtoCategory = 'watches', vtoProducts = [], vtoSelected = null, vtoLoop = fal
 let vtoFacingMode = 'user', vtoHandedness = '', vtoLastTs = 0, vtoStatusText = '', vtoLoggedRun = -1, vtoWatchdog = null;
 let vtoShots = [], vtoLastSig = null, vtoLastShotAt = 0, vtoAutoCapture = true, vtoAutoCount = 0, vtoMeasurements = {};
 let handLandmarker = null, faceLandmarker = null, poseLandmarker = null, vtoVisionPromise = null, vtoVisionKey = '', vtoFaceCache = null, vtoFrameNo = 0;
-let accessoryAR = null, accessoryARPromise = null, vtoKindFor = null, vtoPendingId = null;
+let accessoryAR = null, accessoryARPromise = null, vtoKindFor = null, vtoPendingId = null, vtoSizing = null, vtoFitText = '', vtoFitTick = 0;
 const vtoTarget = () => VTO_TARGET[vtoCategory] || 'wrist';
 const isTouch = () => matchMedia('(pointer:coarse)').matches;
 
@@ -32,12 +32,44 @@ function renderVtoCats() {
   $('vtoCats').innerHTML = Object.entries(CATEGORY).map(([k, c]) =>
     `<button class="${k === vtoCategory ? 'active' : ''}" role="tab" aria-selected="${k === vtoCategory}" onclick="setVtoCategory('${k}')">${icon(c.icon)}${c.label}</button>`).join('');
 }
+// ---------- Sizes ----------
+function pickTryOnSize(id, size) {
+  chosenSize[id] = size; const p = vtoProducts.find(r => r.id === id) || vtoSelected;
+  accessoryAR?.setSize(p.category, size); vtoFitText = ''; renderVtoSizes();
+  toast(`Size ${size} · ${(SIZES[p.category].find(([s]) => s === size) || [])[1] || ''}`);
+}
+// Body size for the fit check: a soft-tape reading if saved, otherwise what the tracker measured.
+function bodyMeasure() {
+  const t = vtoTarget(), tape = vtoMeasurements[t], p = accessoryAR?.lastPose;
+  if (t === 'wrist') { const c = tape ? tape * .0254 : p?.size?.circumference; return c ? { wristCircumference: c, wristWidth: c / 2.72 } : {}; }
+  if (t === 'finger') { const d = tape ? tape * .0254 / Math.PI : p?.size?.diameter; return d ? { fingerDiameter: d } : {}; }
+  return {};
+}
+function renderVtoSizes() {
+  const p = vtoSelected;
+  $('vtoSizes').innerHTML = p ? sizeChips(p, 'pickTryOnSize') : '';
+  $('stageSizes').innerHTML = p ? sizeChips(p, 'pickTryOnSize', 'glass-sizes') : '';
+  updateFit(true);
+}
+function updateFit(force) {
+  const p = vtoSelected, f = p && vtoSizing?.fitFor(p.category, sizeOf(p), bodyMeasure());
+  const text = f ? f.label : '', kind = f?.fit || '';
+  if (!force && text + kind === vtoFitText) return; vtoFitText = text + kind;
+  // Show the body size the fit check is using, so an exact tape reading is one tap away.
+  const t = vtoTarget(), body = bodyMeasure();
+  if (vtoMeasurements[t] == null && (body.wristCircumference || body.fingerDiameter)) {
+    const cm = body.wristCircumference ? body.wristCircumference * 100 : body.fingerDiameter * Math.PI * 100;
+    $('vtoMeasurementResult').textContent = `Estimated ${t === 'finger' ? 'ring finger' : 'wrist'} ${cm.toFixed(1)} cm (${(cm / 2.54).toFixed(1)} in) from your hand. Enter a soft-tape reading for an exact fit.`;
+  }
+  for (const id of ['vtoFit', 'stageFit']) { const el = $(id); el.textContent = text; el.className = 'fit-badge ' + kind; el.classList.toggle('hidden', !text); }
+}
 function vtoThumb(p) { return p.image ? `<img src="${esc(p.image)}" alt="">` : icon(CATEGORY[p.category]?.icon || 'cube'); }
 function renderVtoProducts() {
   const empty = `<p class="fine" style="margin:4px 2px">No ${CATEGORY[vtoCategory].label.toLowerCase()} with a 3D model yet.</p>`;
   $('vtoList').innerHTML = vtoProducts.map(p => `<button class="prow ${p.id === vtoSelected?.id ? 'active' : ''}" onclick="selectVtoProduct(${p.id})"><span class="thumb">${vtoThumb(p)}</span><span><b>${esc(p.name)}</b><small>${money(p.price)}</small></span></button>`).join('') || empty;
   $('vtoCarousel').innerHTML = Object.entries(CATEGORY).filter(([k]) => k !== vtoCategory).map(([k, c]) => `<button class="car-item glass" onclick="setVtoCategory('${k}')" aria-label="Switch to ${c.label}"><span class="thumb">${icon(c.icon)}</span><span>${c.label}</span></button>`).join('');
   $('vtoCarousel').insertAdjacentHTML('afterbegin', vtoProducts.map(p => `<button class="car-item glass ${p.id === vtoSelected?.id ? 'active' : ''}" onclick="selectVtoProduct(${p.id})"><span class="thumb">${vtoThumb(p)}</span><span>${esc(p.name)}</span></button>`).join(''));
+  renderVtoSizes();
 }
 async function initTryOn() {
   renderVtoCats(); updateIntro(); updateMeasurementUI(); renderShots();
@@ -65,7 +97,7 @@ async function loadVtoProducts(preferId) {
 }
 async function getAR() {
   if (accessoryAR) return accessoryAR;
-  accessoryARPromise ??= import('/modules/vto3d.js?v=7').then(mod => { vtoKindFor = mod.kindFor; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
+  accessoryARPromise ??= Promise.all([import('/modules/vto3d.js?v=8'), import('/modules/wristpose.js?v=7')]).then(([mod, sizing]) => { vtoKindFor = mod.kindFor; vtoSizing = sizing; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
   return accessoryARPromise;
 }
 async function selectVtoProduct(id) {
@@ -76,7 +108,7 @@ async function selectVtoProduct(id) {
     const url = p.asset_url || (await api('/products/' + p.id + '/asset')).url;
     const ar = await getAR(); if (vtoSelected?.id !== id) return;
     if (vtoLoop) setStatus('Loading ' + p.name + '…');
-    vtoStable = 0; await ar.load(url, vtoKindFor(p.category));
+    vtoStable = 0; ar.setSize(p.category, sizeOf(p)); await ar.load(url, vtoKindFor(p.category)); renderVtoSizes();
   } catch { if (vtoSelected?.id === id) { setStatus('This 3D model could not be loaded.', 'error'); msg('This 3D model could not be loaded. Check that the file is a valid GLB.'); } }
 }
 async function chooseVtoProduct(id, category) {
@@ -111,7 +143,7 @@ function updateMeasurementUI() {
 function saveVtoMeasurement(raw = $('vtoMeasurement').value) {
   const value = Number(raw), [lo, hi] = VTO_COPY[vtoTarget()].range;
   if (!Number.isFinite(value) || value < lo || value > hi) return msg(`Enter a reading between ${lo} and ${hi} inches.`);
-  vtoMeasurements[vtoTarget()] = Math.round(value * 10) / 10; updateMeasurementUI(); toast('Size saved: ' + vtoMeasurements[vtoTarget()] + ' in');
+  vtoMeasurements[vtoTarget()] = Math.round(value * 10) / 10; updateMeasurementUI(); updateFit(true); toast('Size saved: ' + vtoMeasurements[vtoTarget()] + ' in');
 }
 function openSizeDialog() { updateMeasurementUI(); openDialog('sizeDialog'); }
 
@@ -249,6 +281,7 @@ function processFrame() {
   vtoLocked = locked;
   const guide = $('cameraGuide'); guide.classList.toggle('show', !locked); guide.classList.toggle('near', status.found && !locked); guide.classList.toggle('locked', locked);
   updateLiveStatus(status, pose, locked);
+  if (locked && ++vtoFitTick % 15 === 0) updateFit();
   if (locked) maybeAutoCapture(status, ts);
 }
 function frameStatus(target, ts, video) {

@@ -2,7 +2,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {fitCamera,handScale,chiralityEvidence,detectForearm,solveWristPose,solveFingerPose,solveNeckPose} from '../../web/modules/wristpose.js';
+import {fitCamera,handScale,chiralityEvidence,detectForearm,solveWristPose,solveFingerPose,solveNeckPose,wristSize,fitFor,bangleAxes,SIZE_CHART} from '../../web/modules/wristpose.js';
 
 const dir=new URL('./fixtures/',import.meta.url);
 const F=JSON.parse(readFileSync(new URL('real_frames.json',dir)));
@@ -103,4 +103,40 @@ test('necklace sits between the shoulders and chin and faces the camera', ()=>{
   assert.ok(p.dialFacing>.8,'necklace faces the camera');
   const shoulderPx=Math.hypot((n.shoulders[0][0]-n.shoulders[1][0])*n.W,(n.shoulders[0][1]-n.shoulders[1][1])*n.H);
   assert.ok(Math.abs(p.scale*.313-shoulderPx)<.05*shoulderPx,'scale from shoulder width');
+});
+
+test('a background-inflated arm measurement cannot balloon the strap', ()=>{
+  // Phone photo 13: a skin-coloured curtain beside the arm made the silhouette ~1.3x too wide.
+  assert.equal(wristSize(undefined,.074).width,.056,'1.32x measurement ignored');
+  assert.equal(wristSize(undefined,.030).width,.056,'0.54x measurement ignored');
+  assert.ok(Math.abs(wristSize(undefined,.061).width-.061)<1e-9,'consistent measurement used');
+  const tape=wristSize(6.5);assert.ok(Math.abs(tape.circumference-6.5*.0254)<1e-6,'tape reading reproduced exactly');
+});
+
+test('S/M/L sizes are visibly different at real phone scale', ()=>{
+  const pxPerM=3400; // measured on the user's phone frames
+  const caseDiff=(SIZE_CHART.watches.sizes.L-SIZE_CHART.watches.sizes.S)*pxPerM;
+  const bangleDiff=2*(bangleAxes(SIZE_CHART.bracelets.sizes.L).a-bangleAxes(SIZE_CHART.bracelets.sizes.S).a)*pxPerM;
+  const ringDiff=(SIZE_CHART.rings.sizes.L-SIZE_CHART.rings.sizes.S)*pxPerM*1.8; // fingers are filmed closer
+  const dropDiff=fitFor('necklaces','L').drop-fitFor('necklaces','S').drop;
+  assert.ok(caseDiff>=25,`watch case S→L ${caseDiff.toFixed(0)}px`);
+  assert.ok(bangleDiff>=30,`bangle S→L ${bangleDiff.toFixed(0)}px`);
+  assert.ok(ringDiff>=15,`ring S→L ${ringDiff.toFixed(0)}px`);
+  assert.ok(dropDiff*2650>=120,`pendant S→L ${(dropDiff*2650).toFixed(0)}px`);
+  // The bangle oval really has the chosen inner circumference.
+  const {a,b}=bangleAxes(.18),h=((a-b)/(a+b))**2,perimeter=Math.PI*(a+b)*(1+3*h/(10+Math.sqrt(4-3*h)));
+  assert.ok(Math.abs(perimeter-.18)<.0005,`bangle perimeter ${(perimeter*100).toFixed(2)} cm`);
+});
+
+test('fit check compares each size with the body', ()=>{
+  const wrist={wristCircumference:.16,wristWidth:.16/2.72};
+  assert.equal(fitFor('bracelets','S',wrist).fit,'tight');
+  assert.equal(fitFor('bracelets','M',wrist).fit,'fits');
+  assert.equal(fitFor('bracelets','L',{wristCircumference:.15}).fit,'loose');
+  const finger={fingerDiameter:.0173};
+  assert.equal(fitFor('rings','S',finger).fit,'tight');
+  assert.equal(fitFor('rings','M',finger).fit,'fits');
+  assert.equal(fitFor('rings','L',finger).fit,'loose');
+  assert.equal(fitFor('watches','L',wrist).fit,'fits');
+  assert.ok(fitFor('necklaces','S').drop<0&&fitFor('necklaces','L').drop>0);
 });
