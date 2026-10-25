@@ -93,95 +93,122 @@ export function wristFrame(world,anatomicalRight){
   return {X,Y,Z,W,palmWidth:len(sub(I,P)),handLength:len(sub(knuckles,W))};
 }
 
-export function wristSize(frame,tapeInches,measuredWidth){
-  let width;
-  if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/2.67; // ellipse w × 0.72w ≈ 2.67w perimeter
-  else{
-    const fromPalm=Math.min(.07,Math.max(.042,frame.palmWidth*.9));
-    // The measured silhouette is the best size signal, but skin edges get lost in shadow more often than
-    // they overshoot, so it may shrink the palm-based estimate only a little and widen it more.
-    width=Number.isFinite(measuredWidth)?clamp(measuredWidth,Math.max(.04,fromPalm*.86),Math.min(.078,fromPalm*1.3)):fromPalm;
+// Pixels per real metre. MediaPipe's world landmarks have the right shape but not a reliable size (a
+// fist can come out at half its real width), so the scale comes from image spans of hand bones whose real
+// length varies little between adults, each corrected for foreshortening with the fitted 3D orientation.
+const HAND_SPANS=[[5,17,.066],[0,9,.088],[0,5,.083],[0,17,.074]];
+export function handScale(image,world,cam,width,height){
+  let sum=0,weight=0;
+  for(const [a,b,real] of HAND_SPANS){
+    const u=norm(sub(world[b],world[a]));if(!u)continue;
+    const d=cam.toCamera(u),f=Math.hypot(d.x,d.y);if(f<.5)continue;
+    const px=Math.hypot((image[a].x-image[b].x)*width,(image[a].y-image[b].y)*height);
+    sum+=f*f*Math.log(px/(real*f));weight+=f*f;
   }
+  return weight?Math.exp(sum/weight):cam.scale;
+}
+
+// Wrist cross-section (metres): a soft-tape reading wins, then the measured forearm silhouette, then an
+// adult average. Thickness (back of wrist to palm side) is ~0.72 of the side-to-side width.
+export function wristSize(tapeInches,measuredWidth){
+  let width=.056;
+  if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/2.67; // ellipse w × 0.72w ≈ 2.67w perimeter
+  else if(Number.isFinite(measuredWidth))width=clamp(measuredWidth,.042,.074);
   return {width,thickness:width*.72};
 }
 
 // ---------- Forearm from the camera image ----------
-// MediaPipe tracks the hand, not the forearm. When the wrist bends, the hand axis can be 60°+ away
-// from the forearm the watch actually sits on. The forearm is found from skin colour sampled on the
-// hand itself: the direction from the wrist with the most skin, then the forearm's two edges.
-
-function hull(points){
-  const p=points.slice().sort((a,b)=>a.x-b.x||a.y-b.y),c=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
-  const lo=[],hi=[];
-  for(const q of p){while(lo.length>1&&c(lo[lo.length-2],lo[lo.length-1],q)<=0)lo.pop();lo.push(q);}
-  for(const q of p.reverse()){while(hi.length>1&&c(hi[hi.length-2],hi[hi.length-1],q)<=0)hi.pop();hi.push(q);}
-  return lo.slice(0,-1).concat(hi.slice(0,-1));
-}
-function insideConvex(poly,q){
-  let sign=0;
-  for(let i=0;i<poly.length;i++){
-    const a=poly[i],b=poly[(i+1)%poly.length],c=(b.x-a.x)*(q.y-a.y)-(b.y-a.y)*(q.x-a.x);
-    if(c!==0){if(sign===0)sign=Math.sign(c);else if(Math.sign(c)!==sign)return false;}
-  }
-  return true;
-}
+// MediaPipe tracks the hand, not the forearm. When the wrist bends, the hand axis can be 60°+ away from
+// the forearm the watch sits on. The forearm is found as a pair of roughly parallel edges (colour or
+// brightness steps) enclosing skin-coloured pixels, measured on several cross-sections up the arm. Using
+// both edges keeps shadow on the underside or a skin-coloured background from biasing centre or angle.
 const yuv=(r,g,b)=>({y:.299*r+.587*g+.114*b,cb:128-.168736*r-.331264*g+.5*b,cr:128+.5*r-.418688*g-.081312*b});
 const median=a=>{const s=a.slice().sort((x,y)=>x-y);return s[s.length>>1];};
 
-// pix: RGBA bytes of a w×h downscaled frame; image: 21 normalised MediaPipe landmarks.
-// Returns {dir, centre, width, score} in normalised image units (dir points from elbow toward hand), or null.
-export function detectForearm(pix,w,h,image,offsetFraction=.32){
+// pix: RGBA bytes of a w×h downscaled frame; image: 21 normalised MediaPipe hand landmarks.
+// Returns {dir (elbow → hand, unit, pixels), centre (normalised, at the watch position), widthPx (sample px),
+// frameW, score, stations} or null when the arm's edges are not clear.
+export function detectForearm(pix,w,h,image,watchAt=.3){
   if(!pix||image?.length!==21||w<16||h<16)return null;
   const P=image.map(p=>({x:p.x*w,y:p.y*h}));
   const W=P[0],K={x:(P[5].x+P[9].x+P[13].x+P[17].x)/4,y:(P[5].y+P[9].y+P[13].y+P[17].y)/4};
   const L=Math.hypot(K.x-W.x,K.y-W.y);if(L<8)return null;
-  const at=(x,y)=>{x=Math.round(x);y=Math.round(y);if(x<0||y<0||x>=w||y>=h)return null;const i=(y*w+x)*4;return yuv(pix[i],pix[i+1],pix[i+2]);};
-  // Skin model from the back of the hand / palm between wrist and knuckles.
-  const cb=[],cr=[],ly=[];
-  for(const k of [5,9,13,17,1])for(const t of [.25,.45,.65])for(const [dx,dy] of [[0,0],[1,0],[-1,0],[0,1],[0,-1]]){
-    const s=at(W.x+(P[k].x-W.x)*t+dx,W.y+(P[k].y-W.y)*t+dy);if(s){cb.push(s.cb);cr.push(s.cr);ly.push(s.y);}
-  }
-  if(cb.length<20)return null;
-  const mcb=median(cb),mcr=median(cr),my=median(ly);
-  const mad=(a,m)=>median(a.map(v=>Math.abs(v-m)));
-  const tcb=clamp(3*mad(cb,mcb),5,16),tcr=clamp(3*mad(cr,mcr),5,16);
-  const skin=s=>!!s&&Math.abs(s.cb-mcb)<=tcb&&Math.abs(s.cr-mcr)<=tcr&&s.y>my*.35&&s.y<my*1.6+30;
-  const handPoly=hull(P);
-  const ax={x:(K.x-W.x)/L,y:(K.y-W.y)/L},base=Math.atan2(-ax.y,-ax.x);
-  const scoreDir=phi=>{
-    const d={x:Math.cos(phi),y:Math.sin(phi)},p={x:-d.y,y:d.x};let n=0,hit=0,total=0;
-    for(let r=.45;r<=1.65;r+=.15)for(let o=-.3;o<=.3001;o+=.15){
-      total++;const q={x:W.x+(d.x*r+p.x*o)*L,y:W.y+(d.y*r+p.y*o)*L};
-      if(insideConvex(handPoly,q))continue;const s=at(q.x,q.y);if(!s)continue;n++;if(skin(s))hit++;
-    }
-    if(n<total*.5)return -1;
-    const dev=Math.abs(Math.atan2(Math.sin(phi-base),Math.cos(phi-base)))/(Math.PI/2);
-    return hit/n-.12*dev*dev;
+  const E=.86*Math.max(Math.hypot(P[5].x-P[17].x,P[5].y-P[17].y),.72*L); // expected silhouette width
+  const px=(x,y)=>{
+    if(x<0||y<0||x>w-1.001||y>h-1.001)return null;
+    const x0=x|0,y0=y|0,fx=x-x0,fy=y-y0,i=(y0*w+x0)*4,j=i+w*4,c=[0,0,0];
+    for(let k=0;k<3;k++)c[k]=(pix[i+k]*(1-fx)+pix[i+4+k]*fx)*(1-fy)+(pix[j+k]*(1-fx)+pix[j+4+k]*fx)*fy;
+    return yuv(c[0],c[1],c[2]);
   };
-  let best=-1,bestPhi=base;
-  for(let a=-100;a<=100;a+=5){const phi=base+a*Math.PI/180,s=scoreDir(phi);if(s>best){best=s;bestPhi=phi;}}
-  for(let a=-4;a<=4;a+=1){const phi=bestPhi+a*Math.PI/180,s=scoreDir(phi);if(s>best+1e-9){best=s;bestPhi=phi;}}
-  if(best<.56)return null;
-  const d={x:Math.cos(bestPhi),y:Math.sin(bestPhi)},p={x:-d.y,y:d.x};
-  // Cross-sections around the watch position: walk out from the axis to the first non-skin run.
-  const widths=[],centres=[];
-  for(const r of [offsetFraction-.08,offsetFraction,offsetFraction+.08,offsetFraction+.16]){
-    const c={x:W.x+d.x*r*L,y:W.y+d.y*r*L},edge=sgn=>{
-      let miss=0;for(let o=0;o<=1.4*L;o+=1){const s=at(c.x+p.x*o*sgn,c.y+p.y*o*sgn);if(!s)return null;if(skin(s))miss=0;else if(++miss>=3)return o-2.5;}
-      return null;
-    };
-    const a=edge(1),b=edge(-1);
-    if(a!=null&&b!=null&&a+b>.35*L&&a+b<1.7*L){widths.push(a+b);centres.push({x:c.x+p.x*(a-b)/2,y:c.y+p.y*(a-b)/2});}
-  }
-  // Downscaled pixels keep the video's aspect ratio, so this is also the direction in video pixels.
-  const out={dir:{x:-d.x,y:-d.y},score:best};
-  if(widths.length>=2){
-    const mw=median(widths),keep=widths.map((v,i)=>[v,centres[i]]).filter(([v])=>Math.abs(v-mw)<.2*mw);
-    const c=keep.reduce((s,[,q])=>({x:s.x+q.x/keep.length,y:s.y+q.y/keep.length}),{x:0,y:0});
-    // Normalised units: centre in [0,1] image coordinates, width in pixels of the downscaled frame / w.
-    out.centre={x:c.x/w,y:c.y/h};out.widthPx=mw;out.frameW=w;out.frameH=h;
-  }
-  return out;
+  // Skin chroma from the back of the hand / palm between wrist and knuckles (brightness is ignored).
+  const cb=[],cr=[],ly=[];
+  for(const k of [5,9,13,17,1])for(const t of [.25,.45,.65]){const q=px(W.x+(P[k].x-W.x)*t,W.y+(P[k].y-W.y)*t);if(q){cb.push(q.cb);cr.push(q.cr);ly.push(q.y);}}
+  if(cb.length<8)return null;
+  const mcb=median(cb),mcr=median(cr),my=Math.max(20,median(ly)),mad=(a,m)=>median(a.map(v=>Math.abs(v-m)));
+  const tcb=clamp(2*mad(cb,mcb),3.5,9),tcr=clamp(2*mad(cr,mcr),3.5,9);
+  // Chroma decides skin; brightness far below the hand's (dark wood, deep shade) only counts partly, so a
+  // skin-coloured background is not mistaken for the arm while a shaded underside still mostly counts.
+  const skin=q=>{
+    if(!q||q.y<10)return 0;const dc=Math.hypot((q.cb-mcb)/tcb,(q.cr-mcr)/tcr),c=dc<1.4?1:dc<2.3?(2.3-dc)/.9:0,r=q.y/my;
+    return c*(r>.55&&r<1.9?1:r<=.55?clamp((r-.25)/.3,0,1):clamp((2.6-r)/.7,0,1));
+  };
+  const STEP=.75,HALF=1.5*E,N=Math.floor(2*HALF/STEP)+1;
+  // One cross-section: the best edge pair perpendicular to direction theta at distance r from the wrist.
+  const station=(theta,r)=>{
+    const d={x:Math.cos(theta),y:Math.sin(theta)},n={x:-d.y,y:d.x},C={x:W.x+d.x*r,y:W.y+d.y*r};
+    const Y=new Float32Array(N),B=new Float32Array(N),R=new Float32Array(N),S=new Float32Array(N);let missing=0;
+    for(let i=0;i<N;i++){const t=-HALF+i*STEP,q=px(C.x+n.x*t,C.y+n.y*t);if(!q){missing++;S[i]=-1;continue;}Y[i]=q.y;B[i]=q.cb;R[i]=q.cr;S[i]=skin(q);}
+    if(missing>N*.2)return null;
+    const g=new Float32Array(N);let gmax=1;
+    for(let i=2;i<N-2;i++){if(S[i-2]<0||S[i+2]<0)continue;g[i]=.5*Math.abs(Y[i+2]-Y[i-2])+.9*(Math.abs(B[i+2]-B[i-2])+Math.abs(R[i+2]-R[i-2]));gmax=Math.max(gmax,g[i]);}
+    const peaks=[];
+    for(let i=3;i<N-3;i++)if(g[i]>4&&g[i]>=g[i-1]&&g[i]>=g[i+1])peaks.push(i);
+    peaks.sort((a,b)=>g[b]-g[a]);peaks.length=Math.min(peaks.length,10);
+    // A real arm edge runs along the arm: the local image gradient there points across the scan line.
+    // Diagonal cuts through a single edge (or stripes in the background) fail this test.
+    const align=new Map();
+    for(const i of peaks){
+      const t=-HALF+i*STEP,x=C.x+n.x*t,y=C.y+n.y*t;let jxx=0,jyy=0,jxy=0;
+      const a=px(x-1.5,y),b=px(x+1.5,y),c=px(x,y-1.5),e=px(x,y+1.5);
+      if(a&&b&&c&&e)for(const k of ['y','cb','cr']){const wgt=k==='y'?1:2.5,gx=(b[k]-a[k])*wgt,gy=(e[k]-c[k])*wgt;jxx+=gx*gx;jyy+=gy*gy;jxy+=gx*gy;}
+      const phi=.5*Math.atan2(2*jxy,jxx-jyy);align.set(i,jxx+jyy>1e-6?Math.abs(Math.cos(phi)*n.x+Math.sin(phi)*n.y):0);
+    }
+    const mean=(a,b)=>{let s=0,c=0;for(let i=Math.max(0,a);i<=Math.min(N-1,b);i++)if(S[i]>=0){s+=S[i];c++;}return c?s/c:.5;};
+    let best=null;
+    for(let a=0;a<peaks.length;a++)for(let b=0;b<peaks.length;b++){
+      const p=peaks[a],q=peaks[b];if(q<=p)continue;
+      const width=(q-p)*STEP;if(width<.55*E||width>1.6*E)continue;
+      const inside=mean(p+3,q-3);if(inside<.45)continue;
+      const al=Math.min(align.get(p),align.get(q));if(al<.6)continue;
+      const outside=(mean(p-8,p-3)+mean(q+3,q+8))/2;
+      const score=(g[p]+g[q])/(2*gmax)+1.4*inside-.8*outside-.6*Math.abs(width/E-1)+.8*(al-.85);
+      if(!best||score>best.score)best={score,offset:-HALF+(p+q)/2*STEP,width};
+    }
+    return best&&{...best,r};
+  };
+  // A direction is good when its cross-sections agree: centres on a straight line, similar widths.
+  const evalDir=theta=>{
+    const st=[.35,.6,.85,1.1].map(f=>station(theta,f*L)).filter(Boolean);
+    if(st.length<3)return null;
+    const n=st.length,mr=st.reduce((s,q)=>s+q.r,0)/n,mo=st.reduce((s,q)=>s+q.offset,0)/n;
+    let sxx=0,sxy=0;st.forEach(q=>{sxx+=(q.r-mr)**2;sxy+=(q.r-mr)*(q.offset-mo);});
+    const m=sxy/(sxx||1),resid=Math.sqrt(st.reduce((s,q)=>s+(q.offset-(mo+m*(q.r-mr)))**2,0)/n);
+    const widths=st.map(q=>q.width),mw=median(widths),cv=Math.sqrt(widths.reduce((s,v)=>s+(v-mw)**2,0)/n)/mw;
+    // The arm's centre line must pass through the wrist: its offset at the wrist landmark (r = 0) should be small.
+    const c0=mo-m*mr;
+    const score=st.reduce((s,q)=>s+q.score,0)/4-.8*Math.abs(m)-1.2*cv-.6*resid/E-1.5*(c0/E)**2;
+    return {theta,score,m,mo,mr,mw,n,c0};
+  };
+  const base=Math.atan2(W.y-K.y,W.x-K.x);let best=null;
+  for(let a=-36;a<=36;a+=9){const r=evalDir(base+a*Math.PI/180);if(r){r.score-=.5*(a/36)**2;if(!best||r.score>best.score)best=r;}}
+  if(!best)return null;
+  // Refine: a sloping line of centres means the scan direction is off by atan(slope).
+  for(let k=0;k<2;k++){const r=evalDir(best.theta+Math.atan(best.m));if(r&&r.score>best.score-.05)best=r;else break;}
+  if(best.score<1.2)return null;
+  const theta=best.theta+Math.atan(best.m),d={x:Math.cos(best.theta),y:Math.sin(best.theta)},nrm={x:-d.y,y:d.x};
+  const rw=watchAt*L,off=best.mo+best.m*(rw-best.mr),C={x:W.x+d.x*rw+nrm.x*off,y:W.y+d.y*rw+nrm.y*off};
+  // Downscaled pixels keep the video's aspect ratio, so this direction is also valid in video pixels.
+  return {dir:{x:-Math.cos(theta),y:-Math.sin(theta)},centre:{x:C.x/w,y:C.y/h},widthPx:best.mw*Math.cos(Math.atan(best.m)),frameW:w,frameH:h,score:best.score,stations:best.n};
 }
 
 // Rotate the hand frame (minimal flexion + deviation) so its forearm axis matches the 2D forearm direction.
@@ -210,6 +237,7 @@ export function solveWristPose({image,world,width,height,right,handedness,forear
   const cam=fitCamera(image,world,width,height);if(!cam)return null;
   if(typeof right!=='boolean')right=chiralityEvidence(world,handedness)>=0;
   const f=wristFrame(world,right);if(!f)return null;
+  const scale=handScale(image,world,cam,width,height);
   let X=cam.toCamera(f.X),Y=cam.toCamera(f.Y),Z=cam.toCamera(f.Z),aligned=false,flexion=0;
   if(forearm?.dir){const a=alignToForearm(X,Y,Z,forearm.dir);if(a){({X,Y,Z}=a);aligned=true;flexion=a.flexion;}}
   // Measured forearm width (orthographic silhouette of an elliptical wrist, 0.72 thickness ratio).
@@ -217,15 +245,17 @@ export function solveWristPose({image,world,width,height,right,handedness,forear
   if(forearm?.widthPx&&aligned){
     const m=Math.hypot(X.x,X.y),p={x:-X.y/m,y:X.x/m},py=Y.x*p.x+Y.y*p.y,pz=Z.x*p.x+Z.y*p.y;
     const pxWidth=forearm.widthPx*width/forearm.frameW,k=Math.sqrt(py*py+(.72*pz)**2);
-    if(k>.3)measuredWidth=pxWidth/cam.scale/k;
+    if(k>.3)measuredWidth=pxWidth/scale/k;
   }
-  const size=wristSize(f,tapeInches,measuredWidth);
-  // Watch sits ~2 cm up the forearm from the wrist crease, centred in the wrist's cross-section.
+  const size=wristSize(tapeInches,measuredWidth);
+  // Watch sits ~2 cm up the forearm from the wrist crease, centred in the wrist's cross-section: when the
+  // arm's edges were found, slide sideways onto the measured centre line.
   const w0=cam.project(f.W);
-  let x=w0.x-X.x*offset*cam.scale,y=w0.y-X.y*offset*cam.scale;
-  if(aligned&&forearm.centre&&measuredWidth>=size.width*.85){
-    const cx=forearm.centre.x*width,cy=forearm.centre.y*height,shift=Math.hypot(cx-x,cy-y);
-    if(shift<f.palmWidth*cam.scale*.6){x=cx;y=cy;}
+  let x=w0.x-X.x*offset*scale,y=w0.y-X.y*offset*scale;
+  if(aligned&&forearm.centre){
+    const m=Math.hypot(forearm.dir.x,forearm.dir.y)||1,nx=-forearm.dir.y/m,ny=forearm.dir.x/m;
+    const across=(x-forearm.centre.x*width)*nx+(y-forearm.centre.y*height)*ny;
+    if(Math.abs(across)<size.width*scale){x-=nx*across;y-=ny*across;}
   }
   // A watch is worn to read upright for its wearer: 12 o'clock points to the little-finger side on
   // either wrist (so on a right wrist the crown faces the elbow). Landmark identity gives that side
@@ -233,7 +263,7 @@ export function solveWristPose({image,world,width,height,right,handedness,forear
   const pinkySide=cam.toCamera(sub(world[17],world[5]));
   const toElbow=dot(Y,pinkySide)<0;
   if(toElbow){X=mul(X,-1);Y=mul(Y,-1);}
-  return {x,y,scale:cam.scale,axes:{X,Y,Z},size,crownToElbow:toElbow,anatomicalRight:right,residual:cam.residual,aligned,flexion,measuredWidth,
+  return {x,y,scale,axes:{X,Y,Z},size,crownToElbow:toElbow,anatomicalRight:right,residual:cam.residual,aligned,flexion,measuredWidth,
     // > 0 when the back of the wrist (watch dial) faces the camera.
     dialFacing:-Z.z,
     forearm:toElbow?{x:X.x,y:X.y}:{x:-X.x,y:-X.y}};
@@ -247,14 +277,16 @@ export function solveFingerPose({image,world,width,height,right,handedness,tapeI
   const f=wristFrame(world,right);if(!f)return null;
   const mcp=world[13],pip=world[14],Xw=norm(sub(pip,mcp));if(!Xw)return null;
   const Zw=norm(sub(f.Z,mul(Xw,dot(f.Z,Xw))));if(!Zw)return null;
-  // Ring size: a soft-tape circumference wins; otherwise ring fingers are ~27% of the knuckle span.
-  const diameter=Number.isFinite(tapeInches)&&tapeInches>1.2&&tapeInches<3.8?tapeInches*.0254/Math.PI:clamp(f.palmWidth*.27,.0155,.0215);
+  // Ring size: a soft-tape circumference wins; otherwise an average ring finger (US 7, 17.3 mm).
+  const diameter=Number.isFinite(tapeInches)&&tapeInches>1.2&&tapeInches<3.8?tapeInches*.0254/Math.PI:.0173;
   const centre=add(mcp,mul(sub(pip,mcp),.36)),p=cam.project(centre);
   const X=cam.toCamera(Xw),Z=cam.toCamera(Zw),Y=cross(Z,X);
+  // True scale from the hand's image size; k converts MediaPipe world units into real metres.
+  const scale=handScale(image,world,cam,width,height),k=cam.scale/scale;
   // Neighbouring proximal phalanges hide the ring's sides when fingers are together.
-  const local=q=>cam.toCamera(sub(q,centre)),capsule=(a,b,r)=>({a:local(world[a]),b:local(world[b]),r});
+  const local=q=>mul(cam.toCamera(sub(q,centre)),k),capsule=(a,b,r)=>({a:local(world[a]),b:local(world[b]),r});
   const occluders=[capsule(13,14,diameter/2),capsule(9,10,diameter*.53),capsule(17,18,diameter*.46),capsule(0,13,diameter*.62)];
-  return {x:p.x,y:p.y,scale:cam.scale,axes:{X,Y,Z},size:{diameter},occluders,anatomicalRight:right,dialFacing:-Z.z};
+  return {x:p.x,y:p.y,scale,axes:{X,Y,Z},size:{diameter},occluders,anatomicalRight:right,dialFacing:-Z.z};
 }
 
 // Necklace from MediaPipe Pose shoulders (11, 12) and the Face Landmarker chin (152).

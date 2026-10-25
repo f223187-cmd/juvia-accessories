@@ -15,6 +15,14 @@ uvicorn app:app --reload
 
 Open http://127.0.0.1:8000. Set `JUVIA_ADMIN_EMAIL` to the email of the initial administrator and `JUVIA_SECRET` to a long random value before deployment. Firebase Email/Password sign-in is enabled for project `juvia-b0ed2`; the API verifies Firebase ID tokens. The Firestore database exists in `asia-south1` with production-mode rules, but Juvia catalogue/review/history data still uses SQLite. Vercel's `/tmp` database and uploads are ephemeral, so do not rely on production data persistence until the Firestore data path is completed. Firebase Storage is not enabled because the project remains on Spark.
 
+## Tests
+
+```bash
+node --test tests/vto/wristpose.test.mjs
+```
+
+Focused try-on solver tests run on landmarks and pixels from real phone frames (scale, forearm alignment, fallback, rotation and jitter robustness, ring and necklace poses).
+
 ## Module endpoints
 
 - Auth: `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`

@@ -65,7 +65,7 @@ async function loadVtoProducts(preferId) {
 }
 async function getAR() {
   if (accessoryAR) return accessoryAR;
-  accessoryARPromise ??= import('/modules/vto3d.js?v=6').then(mod => { vtoKindFor = mod.kindFor; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
+  accessoryARPromise ??= import('/modules/vto3d.js?v=7').then(mod => { vtoKindFor = mod.kindFor; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
   return accessoryARPromise;
 }
 async function selectVtoProduct(id) {
@@ -171,7 +171,7 @@ function enterLive() {
 }
 function stopVto() {
   vtoLoop = false; vtoRunId++; vtoLocked = false; vtoStable = 0; clearInterval(vtoWatchdog);
-  stopCameraStream(); accessoryAR?.hide(); $('vtoCanvas').style.visibility = 'hidden';
+  stopCameraStream(); accessoryAR?.hide(); $('vtoCanvas').style.visibility = 'hidden'; $('vtoFrame').style.visibility = 'hidden'; $('cameraWrap').classList.remove('synced');
   document.body.classList.remove('tryon-live');
   $('vtoIntro').classList.remove('hidden'); $('stageBottom').classList.add('hidden'); $('vtoStop').classList.add('hidden'); $('vtoStep').classList.add('hidden');
   $('cameraGuide').className = 'camera-guide ' + vtoTarget(); vtoStatusText = '';
@@ -226,13 +226,23 @@ function scheduleFrame(runId) {
   const video = $('camera'), next = () => { if (!vtoLoop || runId !== vtoRunId) return; processFrame(); scheduleFrame(runId); };
   if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(next); else requestAnimationFrame(next);
 }
+// The frame MediaPipe analyses is the frame on screen: each camera frame is copied to #vtoFrame, tracked,
+// and drawn together with its accessory in the same task, so the piece cannot lag or drift off the body
+// while it moves (the live <video> would already show a newer frame than the one the landmarks describe).
+let vtoFrameCtx = null;
+function captureFrame() {
+  const video = $('camera'), canvas = $('vtoFrame'); if (video.readyState < 2 || !video.videoWidth) return null;
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; vtoFrameCtx = null; }
+  vtoFrameCtx ??= canvas.getContext('2d', { alpha: false });
+  vtoFrameCtx.drawImage(video, 0, 0); return canvas;
+}
 function processFrame() {
-  const video = $('camera'); if (video.readyState < 2 || !video.videoWidth) return;
+  const frame = captureFrame(); if (!frame || !placeLayers()) return;
   if (!visionReady()) return;
   const ts = Math.max(performance.now(), vtoLastTs + 1); vtoLastTs = ts;
   let status;
-  try { status = frameStatus(vtoTarget(), ts); } catch (e) { stopVto(); msg('Tracking stopped: ' + e.message); return; }
-  const pose = status.found ? renderAccessory(status) : (accessoryAR?.miss(), null);
+  try { status = frameStatus(vtoTarget(), ts, frame); } catch (e) { stopVto(); msg('Tracking stopped: ' + e.message); return; }
+  const pose = status.found ? renderAccessory(status, frame) : (accessoryAR?.miss(), null);
   vtoStable = status.ready ? Math.min(vtoStable + 1, 30) : 0;
   const locked = vtoStable >= 5 && !!pose;
   if (locked && !vtoLocked) { navigator.vibrate?.(10); if (user && vtoLoggedRun !== vtoRunId) { vtoLoggedRun = vtoRunId; api('/history', { method: 'POST', body: { kind: 'try_on', detail: `${vtoSelected?.name || 'Piece'} on your ${CATEGORY[vtoCategory].target.toLowerCase()}` } }).catch(() => {}); } }
@@ -241,8 +251,7 @@ function processFrame() {
   updateLiveStatus(status, pose, locked);
   if (locked) maybeAutoCapture(status, ts);
 }
-function frameStatus(target, ts) {
-  const video = $('camera');
+function frameStatus(target, ts, video) {
   if (target === 'neck') {
     if (!vtoFaceCache || vtoFrameNo++ % 2 === 0) vtoFaceCache = faceLandmarker.detectForVideo(video, ts).faceLandmarks?.[0] || [];
     const result = poseLandmarker.detectForVideo(video, ts), pose = result.landmarks?.[0] || [], world = result.worldLandmarks?.[0] || [], face = vtoFaceCache;
@@ -288,19 +297,22 @@ function frameStatus(target, ts) {
   const used = target === 'finger' ? points.slice(9, 18) : points, ux = used.map(p => p.x), uy = used.map(p => p.y);
   return { found: true, ready, guidance, image, world, handedness: vtoHandedness, signature, box: [Math.min(...ux), Math.min(...uy), Math.max(...ux), Math.max(...uy)] };
 }
-function placeVtoCanvas() {
-  const video = $('camera'), canvas = $('vtoCanvas'), rect = video.getBoundingClientRect(), wrap = $('cameraWrap').getBoundingClientRect();
+// Both canvases use the video element's own box and object-fit, so landmarks in frame pixels land on the
+// same screen pixels for any aspect ratio, and a front camera is mirrored identically for frame and piece.
+function placeLayers() {
+  const video = $('camera'), wrapEl = $('cameraWrap'), rect = video.getBoundingClientRect(), wrap = wrapEl.getBoundingClientRect();
   const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh || !rect.width || !rect.height) return false;
   const fit = getComputedStyle(video).objectFit, scale = fit === 'cover' ? Math.max(rect.width / vw, rect.height / vh) : Math.min(rect.width / vw, rect.height / vh);
   const w = vw * scale, h = vh * scale, left = rect.left - wrap.left + (rect.width - w) / 2, top = rect.top - wrap.top + (rect.height - h) / 2;
-  Object.assign(canvas.style, { left: left + 'px', top: top + 'px', width: w + 'px', height: h + 'px', transform: vtoFacingMode === 'user' ? 'scaleX(-1)' : 'none', visibility: 'visible' });
-  accessoryAR.resize(w, h, vw, vh); return true;
+  const box = { left: left + 'px', top: top + 'px', width: w + 'px', height: h + 'px', transform: vtoFacingMode === 'user' ? 'scaleX(-1)' : 'none', visibility: 'visible' };
+  Object.assign($('vtoFrame').style, box); wrapEl.classList.add('synced');
+  if (accessoryAR) { Object.assign($('vtoCanvas').style, box); accessoryAR.resize(w, h, vw, vh); }
+  return true;
 }
-function renderAccessory(status) {
+function renderAccessory(status, frame) {
   if (!accessoryAR?.ready || !vtoSelected) { accessoryAR?.hide(); return null; }
-  if (!placeVtoCanvas()) return null;
-  const video = $('camera'), tape = vtoMeasurements[vtoTarget()];
-  return accessoryAR.update({ video, width: video.videoWidth, height: video.videoHeight, image: status.image, world: status.world, handedness: status.handedness, chin: status.chin, shoulders: status.shoulders, shouldersWorld: status.shouldersWorld, tapeInches: tape == null ? undefined : Number(tape) });
+  const tape = vtoMeasurements[vtoTarget()];
+  return accessoryAR.update({ video: frame, width: frame.width, height: frame.height, image: status.image, world: status.world, handedness: status.handedness, chin: status.chin, shoulders: status.shoulders, shouldersWorld: status.shouldersWorld, tapeInches: tape == null ? undefined : Number(tape) });
 }
 function setStatus(text, kind = '') {
   const el = $('vtoStep'); if (vtoStatusText === text + kind) return; vtoStatusText = text + kind;
@@ -326,16 +338,19 @@ function isNewView(sig) {
 }
 function maybeAutoCapture(status, ts) {
   if (!vtoAutoCapture || vtoAutoCount >= 6 || ts - vtoLastShotAt < 1500 || vtoStable < 10 || !isNewView(status.signature)) return;
-  const video = $('camera'), vw = video.videoWidth, vh = video.videoHeight;
-  let [x1, y1, x2, y2] = status.box; const pad = Math.max(x2 - x1, y2 - y1) * .35;
+  const frame = $('vtoFrame'), vw = frame.width, vh = frame.height, p = accessoryAR?.lastPose;
+  let [x1, y1, x2, y2] = status.box;
+  // Include the rendered piece (a watch sits on the forearm, outside the hand's landmarks).
+  if (p) { const r = { wrist: .034, finger: .014, neck: .09 }[vtoTarget()] * p.scale; x1 = Math.min(x1, (p.x - r) / vw); x2 = Math.max(x2, (p.x + r) / vw); y1 = Math.min(y1, (p.y - r) / vh); y2 = Math.max(y2, (p.y + r) / vh); }
+  const pad = Math.max(x2 - x1, y2 - y1) * .18;
   x1 = Math.max(0, (x1 - pad) * vw); y1 = Math.max(0, (y1 - pad) * vh); x2 = Math.min(vw, (x2 + pad) * vw); y2 = Math.min(vh, (y2 + pad) * vh);
-  const canvas = accessoryAR.composite(video, vtoFacingMode === 'user', [x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1)]); if (!canvas) return;
+  const canvas = accessoryAR.composite(frame, vtoFacingMode === 'user', [x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1)]); if (!canvas) return;
   vtoLastSig = status.signature; vtoLastShotAt = ts; vtoAutoCount++;
   addShot(canvas.toDataURL('image/jpeg', .9), 'Angle ' + vtoAutoCount); toast('New angle saved');
 }
 function captureLook() {
-  const video = $('camera'); if (!vtoLoop || !video.videoWidth) return;
-  const canvas = accessoryAR ? accessoryAR.composite(video, vtoFacingMode === 'user') : null; if (!canvas) return;
+  const frame = $('vtoFrame'); if (!vtoLoop || !frame.width) return;
+  const canvas = accessoryAR ? accessoryAR.composite(frame, vtoFacingMode === 'user') : null; if (!canvas) return;
   const flash = $('flash'); flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go'); navigator.vibrate?.(20);
   addShot(canvas.toDataURL('image/jpeg', .92), 'Photo'); toast('Photo saved');
 }

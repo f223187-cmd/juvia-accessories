@@ -6,12 +6,13 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
-import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro} from './wristpose.js?v=5';
+import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro} from './wristpose.js?v=6';
 
 const smooth=t=>t<=0?0:t>=1?1:t*t*(3-2*t);
 const ramp=(v,a,b)=>smooth((v-a)/(b-a));
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 const toThree=v=>new THREE.Vector3(v.x,-v.y,-v.z);
+const frameSize=src=>[src?.videoWidth||src?.width||0,src?.videoHeight||src?.height||0];
 const KIND_OF={watches:'watch',bracelets:'bracelet',rings:'ring',necklaces:'necklace'};
 export const kindFor=category=>KIND_OF[category]||'watch';
 
@@ -224,13 +225,14 @@ export class AccessoryAR{
     }
   }
   // One small frame grab per two frames feeds forearm detection, light estimation and reflections.
-  grab(video,now){
-    if(!video?.videoWidth)return null;
+  // src: the camera frame (a video element, or the canvas the frame was copied to for display).
+  grab(src,now){
+    const [vw,vh]=frameSize(src);if(!vw||!vh)return null;
     if(this.sampleAt&&now-this.sampleAt<45)return this.sampleData;
-    const w=160,h=Math.max(16,Math.round(w*video.videoHeight/video.videoWidth));
+    const w=160,h=Math.max(16,Math.round(w*vh/vw));
     if(this.sample.width!==w||this.sample.height!==h){this.sample.width=w;this.sample.height=h;this.sampleCtx=null;}
     this.sampleCtx??=this.sample.getContext('2d',{willReadFrequently:true});
-    try{this.sampleCtx.drawImage(video,0,0,w,h);this.sampleData={pix:this.sampleCtx.getImageData(0,0,w,h).data,w,h};this.sampleAt=now;}
+    try{this.sampleCtx.drawImage(src,0,0,w,h);this.sampleData={pix:this.sampleCtx.getImageData(0,0,w,h).data,w,h};this.sampleAt=now;}
     catch{this.sampleData=null;}
     return this.sampleData;
   }
@@ -245,9 +247,10 @@ export class AccessoryAR{
     }
     if(!n)return;
     const local=(.2126*lr+.7152*lg+.0722*lb)/n,global=gl/gn,m=Math.max(lr,lg,lb)/n||1;
-    const k=clamp(Math.pow((.65*local+.35*global)/135,.8),.28,1.45),a=.12;
+    // Metal stays recognisably metal in dim rooms: darkening is capped and the room colour only lightly tints it.
+    const k=clamp(Math.pow((.65*local+.35*global)/135,.8),.45,1.4),a=.12;
     const L=this.light;L.k+=(k-L.k)*a;L.r+=(clamp(lr/n/m,.55,1)-L.r)*a;L.g+=(clamp(lg/n/m,.55,1)-L.g)*a;L.b+=(clamp(lb/n/m,.55,1)-L.b)*a;
-    const tint=new THREE.Color(.6+.4*L.r,.6+.4*L.g,.6+.4*L.b);
+    const tint=new THREE.Color(.85+.15*L.r,.85+.15*L.g,.85+.15*L.b);
     this.hemi.color.copy(tint);this.hemi.intensity=.5*L.k;
     this.key.color.copy(tint);this.key.intensity=1.55*L.k;
     this.scene.environmentIntensity=.35+.75*L.k;
@@ -258,7 +261,7 @@ export class AccessoryAR{
   updateEnvironment(now){
     this.envAt=now;
     try{
-      const g=this.envCanvas.getContext('2d');g.filter='blur(3px)';g.drawImage(this.sample,0,0,128,64);g.filter='none';
+      const g=this.envCanvas.getContext('2d');g.filter='blur(3px) saturate(.45)';g.drawImage(this.sample,0,0,128,64);g.filter='none';
       const tex=new THREE.CanvasTexture(this.envCanvas);tex.mapping=THREE.EquirectangularReflectionMapping;tex.colorSpace=THREE.SRGBColorSpace;
       const env=this.pmrem.fromEquirectangular(tex).texture;tex.dispose();
       this.cameraEnv?.dispose();this.cameraEnv=env;this.scene.environment=env;
@@ -271,10 +274,20 @@ export class AccessoryAR{
     const K={x:(image[5].x+image[9].x+image[13].x+image[17].x)/4*this.videoW,y:(image[5].y+image[9].y+image[13].y+image[17].y)/4*this.videoH};
     const hand=Math.atan2(K.y-W.y,K.x-W.x),wrap=a=>Math.atan2(Math.sin(a),Math.cos(a));
     if(frame&&this.frameNo++%2===0){
-      const found=detectForearm(frame.pix,frame.w,frame.h,image);
+      let found=detectForearm(frame.pix,frame.w,frame.h,image);
+      // Temporal gate: a forearm angle is used only if it agrees with the current estimate (within 15°) or a
+      // second detection confirms it within 0.7 s, so a one-frame outlier can never tilt the watch.
+      let rel=found&&wrap(Math.atan2(found.dir.y,found.dir.x)-hand);
       if(found){
+        const agrees=(a,b)=>Math.abs(wrap(a-b))<.26,current=this.forearm&&now-this.forearmSeen<2000?this.forearm.rel:null;
+        if(current==null||!agrees(rel,current)){
+          const pending=this.forearmPending;this.forearmPending={rel,at:now};
+          if(!(pending&&now-pending.at<700&&agrees(rel,pending.rel)))found=null;
+        }
+      }
+      if(found){
+        this.forearmPending=null;
         if(now-this.forearmSeen>2000){this.forearm=null;this.fa.reset();this.fcx.reset();this.fcy.reset();this.fw.reset();}
-        let rel=wrap(Math.atan2(found.dir.y,found.dir.x)-hand);
         if(this.forearm)rel=this.forearm.rel+wrap(rel-this.forearm.rel);
         const next={...(this.forearm||{}),rel:this.fa.filter(rel,now)};
         if(found.centre){
@@ -338,17 +351,17 @@ export class AccessoryAR{
     const cam=this.key.shadow.camera;Object.assign(cam,{left:-size,right:size,top:size,bottom:-size,near:.05*s,far:2.5*s});cam.updateProjectionMatrix();
     this.key.shadow.normalBias=.0004*s;
   }
-  miss(now=performance.now()){if(this.anchor.visible&&now-this.lastSeen>180){this.anchor.visible=false;this.render();}}
+  miss(now=performance.now()){if(this.anchor.visible&&now-this.lastSeen>320){this.anchor.visible=false;this.render();}}
   hide(){this.anchor.visible=false;this.hasPose=false;this.render();}
   render(){this.renderer.render(this.scene,this.camera);}
   // Composite of the camera frame and the rendered accessory at video resolution (for captures).
-  composite(video,mirror,crop){
-    const vw=video.videoWidth,vh=video.videoHeight;if(!vw||!vh)return null;
+  composite(src,mirror,crop){
+    const [vw,vh]=frameSize(src);if(!vw||!vh)return null;
     const [sx,sy,sw,sh]=crop||[0,0,vw,vh],scale=Math.min(1,1280/Math.max(sw,sh));
     const out=document.createElement('canvas');out.width=Math.round(sw*scale);out.height=Math.round(sh*scale);
     const g=out.getContext('2d');
     if(mirror){g.translate(out.width,0);g.scale(-1,1);}
-    g.drawImage(video,sx,sy,sw,sh,0,0,out.width,out.height);
+    g.drawImage(src,sx,sy,sw,sh,0,0,out.width,out.height);
     if(this.anchor.visible){
       this.render();const k=this.canvas.width/vw;
       g.drawImage(this.canvas,sx*k,sy*k,sw*k,sh*k,0,0,out.width,out.height);
