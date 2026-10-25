@@ -140,3 +140,13 @@ test('fit check compares each size with the body', ()=>{
   assert.equal(fitFor('watches','L',wrist).fit,'fits');
   assert.ok(fitFor('necklaces','S').drop<0&&fitFor('necklaces','L').drop>0);
 });
+
+test('without the forearm edges, the watch is centred across the real wrist (phone photo 15)', ()=>{
+  // MediaPipe's wrist point sits toward the little finger; the solver must land on the arm's centre line.
+  for(const key of ['phone_wrist_top','phone_wrist_dark']){
+    const f=F[key],{pose}=solve(f,null);
+    const [[x1,y1],[x2,y2]]=f.truth.armLine||[[f.truth.armCentreAtX[0]-100,f.truth.armCentreAtX[1]+100*Math.tan(f.truth.forearmDeg*Math.PI/180)],f.truth.armCentreAtX];
+    const lineY=y1+(pose.x-x1)*(y2-y1)/(x2-x1),off=pose.y-lineY;
+    assert.ok(Math.abs(off)<.1*f.truth.armWidth,`${key}: ${off.toFixed(0)}px off the arm's centre line (width ${f.truth.armWidth}px)`);
+  }
+});

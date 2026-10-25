@@ -455,6 +455,7 @@ body.tryon-live .stage-bottom{animation:hud-up .55s var(--ease-out) .05s both}
 body.vto-locked .shutter::before{animation:ring 1.2s ease-out 2}
 @keyframes ring{0%{opacity:.85;transform:scale(.9)}100%{opacity:0;transform:scale(1.28)}}
 
+#vtoTorch.on{background:linear-gradient(135deg,#F6E3B4,#D4AF6A);color:#1C1917;border-color:transparent}
 /* ---- Respect reduced motion: keep feedback, drop movement ---- */
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}
@@ -473,6 +474,7 @@ body.vto-locked .shutter::before{animation:ring 1.2s ease-out 2}
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   <symbol id="i-flip" viewBox="0 0 24 24"><path d="M4 9a8 8 0 0 1 14.3-3.3L20 7.5"/><path d="M20 3.5v4h-4"/><path d="M20 15a8 8 0 0 1-14.3 3.3L4 16.5"/><path d="M4 20.5v-4h4"/></symbol>
+  <symbol id="i-flash" viewBox="0 0 24 24"><path d="M13 3L5.5 13.5H11L10 21l7.5-10.5H12z"/></symbol>
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8.5a1 1 0 0 1 1-1h3l1.5-2h5l1.5 2h3a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><circle cx="12" cy="13" r="3.5"/></symbol>
   <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></symbol>
   <symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3.5l7.5 4.2v8.6L12 20.5l-7.5-4.2V7.7z"/><path d="M4.5 7.7L12 12l7.5-4.3M12 12v8.5"/></symbol>
@@ -573,6 +575,7 @@ body.vto-locked .shutter::before{animation:ring 1.2s ease-out 2}
           <div class="stage-top">
             <button class="icon-btn glass" id="vtoClose" onclick="stopVto()" aria-label="Stop camera"><svg class="i"><use href="#i-close"/></svg></button>
             <div class="stage-title"><b id="stageProduct">Choose a piece</b><small id="stageCategory">Live try-on</small></div>
+            <button class="icon-btn glass hidden" id="vtoTorch" onclick="toggleTorch()" aria-label="Camera light" aria-pressed="false"><svg class="i"><use href="#i-flash"/></svg></button>
             <button class="icon-btn glass" id="vtoSwitch" onclick="switchVtoCamera()" aria-label="Flip camera"><svg class="i"><use href="#i-flip"/></svg></button>
           </div>
           <div class="status-pill hidden" id="vtoStep" role="status" aria-live="polite"></div>
@@ -756,7 +759,7 @@ body.vto-locked .shutter::before{animation:ring 1.2s ease-out 2}
 <script defer src="/modules/assistant.js?v=6"></script>
 <script defer src="/modules/history.js?v=6"></script>
 <script defer src="/modules/assets.js?v=5"></script>
-<script defer src="/modules/vto.js?v=23"></script>
+<script defer src="/modules/vto.js?v=24"></script>
 <script defer src="/modules/scraping.js?v=5"></script>
 <script defer src="/modules/analytics.js?v=6"></script>
 <script defer src="/modules/app.js?v=7"></script>

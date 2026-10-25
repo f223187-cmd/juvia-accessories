@@ -113,7 +113,7 @@ export function handScale(image,world,cam,width,height){
 // Because the scale already comes from the user's own hand, the hand-based width is close (within ~10%) on
 // real frames; a silhouette that disagrees by more than -20%/+25% has picked up background (a skin-coloured
 // curtain, door or floor) and is ignored rather than clamped, so it can never balloon the strap.
-const WRIST_WIDTH=.056,WRIST_PERIMETER=2.72; // perimeter of a w × 0.72w ellipse ≈ 2.72 w
+const WRIST_WIDTH=.056,WRIST_PERIMETER=2.72,WRIST_RADIAL_SHIFT=.11; // perimeter of a w × 0.72w ellipse ≈ 2.72 w
 export function wristSize(tapeInches,measuredWidth){
   let width=WRIST_WIDTH;
   if(Number.isFinite(tapeInches)&&tapeInches>3&&tapeInches<12)width=tapeInches*.0254/WRIST_PERIMETER;
@@ -289,6 +289,11 @@ export function solveWristPose({image,world,width,height,right,handedness,forear
   // arm's edges were found, slide sideways onto the measured centre line.
   const w0=cam.project(f.W);
   let x=w0.x-X.x*offset*scale,y=w0.y-X.y*offset*scale;
+  // MediaPipe's wrist point sits on the little-finger side of the wrist's centre line (measured on three real
+  // phone frames: 6%, 9% and 19% of the wrist width), so move toward the thumb side by 11% of the width.
+  // In 3D, so the shift shrinks naturally when the wrist is seen side-on.
+  const thumbSide=cam.toCamera(sub(world[5],world[17])),ty=dot(Y,thumbSide)>=0?Y:mul(Y,-1),radial=WRIST_RADIAL_SHIFT*size.width*scale;
+  x+=ty.x*radial;y+=ty.y*radial;
   if(aligned&&forearm.centre){
     const m=Math.hypot(forearm.dir.x,forearm.dir.y)||1,nx=-forearm.dir.y/m,ny=forearm.dir.x/m;
     const across=(x-forearm.centre.x*width)*nx+(y-forearm.centre.y*height)*ny;

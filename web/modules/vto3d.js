@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
-import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro,SIZE_CHART,bangleAxes} from './wristpose.js?v=7';
+import {solveWristPose,solveFingerPose,solveNeckPose,chiralityEvidence,detectForearm,OneEuro,SIZE_CHART,bangleAxes} from './wristpose.js?v=8';
 
 const smooth=t=>t<=0?0:t>=1?1:t*t*(3-2*t);
 const ramp=(v,a,b)=>smooth((v-a)/(b-a));

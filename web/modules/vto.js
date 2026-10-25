@@ -23,6 +23,7 @@ let vtoCategory = 'watches', vtoProducts = [], vtoSelected = null, vtoLoop = fal
 let vtoFacingMode = 'user', vtoHandedness = '', vtoLastTs = 0, vtoStatusText = '', vtoLoggedRun = -1, vtoWatchdog = null;
 let vtoShots = [], vtoLastSig = null, vtoLastShotAt = 0, vtoAutoCapture = true, vtoAutoCount = 0, vtoMeasurements = {};
 let handLandmarker = null, faceLandmarker = null, poseLandmarker = null, vtoVisionPromise = null, vtoVisionKey = '', vtoFaceCache = null, vtoFrameNo = 0;
+let vtoTorchTrack = null, vtoTorch = false, vtoBrightness = 255, vtoBrightTick = 0, vtoFitTipShown = false;
 let accessoryAR = null, accessoryARPromise = null, vtoKindFor = null, vtoPendingId = null, vtoSizing = null, vtoFitText = '', vtoFitTick = 0;
 const vtoTarget = () => VTO_TARGET[vtoCategory] || 'wrist';
 const isTouch = () => matchMedia('(pointer:coarse)').matches;
@@ -99,7 +100,7 @@ async function loadVtoProducts(preferId) {
 }
 async function getAR() {
   if (accessoryAR) return accessoryAR;
-  accessoryARPromise ??= Promise.all([import('/modules/vto3d.js?v=8'), import('/modules/wristpose.js?v=7')]).then(([mod, sizing]) => { vtoKindFor = mod.kindFor; vtoSizing = sizing; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
+  accessoryARPromise ??= Promise.all([import('/modules/vto3d.js?v=9'), import('/modules/wristpose.js?v=8')]).then(([mod, sizing]) => { vtoKindFor = mod.kindFor; vtoSizing = sizing; accessoryAR = new mod.AccessoryAR($('vtoCanvas')); return accessoryAR; }).catch(e => { accessoryARPromise = null; throw e; });
   return accessoryARPromise;
 }
 async function selectVtoProduct(id) {
@@ -185,7 +186,36 @@ async function openVtoCamera(mode, exact = false) {
   const actual = next.getVideoTracks()[0]?.getSettings?.().facingMode;
   vtoFacingMode = actual === 'environment' || actual === 'user' ? actual : mode;
   video.classList.toggle('rear-camera', vtoFacingMode === 'environment');
+  setupTorch(next);
   return next;
+}
+// Camera light (torch): in dim rooms MediaPipe's landmarks get noisy and the arm's edges vanish, so a light
+// improves tracking accuracy. Offered only where the camera reports the capability (usually the back camera).
+function setupTorch(cameraStream) {
+  const track = cameraStream.getVideoTracks()[0]; let caps = {};
+  try { caps = track?.getCapabilities?.() || {}; } catch {}
+  vtoTorchTrack = caps.torch ? track : null; vtoTorch = false;
+  const button = $('vtoTorch'); button.classList.toggle('hidden', !vtoTorchTrack); button.classList.remove('on'); button.setAttribute('aria-pressed', 'false');
+}
+async function toggleTorch() {
+  if (!vtoTorchTrack) return;
+  const next = !vtoTorch;
+  try {
+    await vtoTorchTrack.applyConstraints({ advanced: [{ torch: next }] });
+    vtoTorch = next; $('vtoTorch').classList.toggle('on', next); $('vtoTorch').setAttribute('aria-pressed', String(next));
+    toast(next ? 'Light on' : 'Light off');
+  } catch { msg('This camera cannot turn its light on'); }
+}
+// Average brightness of the live frame, sampled tiny and rarely (every 30 frames) so it costs nothing.
+const vtoBrightCanvas = document.createElement('canvas'); vtoBrightCanvas.width = 32; vtoBrightCanvas.height = 18;
+function measureBrightness(frame) {
+  if (++vtoBrightTick % 30) return;
+  try {
+    const g = vtoBrightCanvas.getContext('2d', { willReadFrequently: true }); g.drawImage(frame, 0, 0, 32, 18);
+    const d = g.getImageData(0, 0, 32, 18).data; let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += .2126 * d[i] + .7152 * d[i + 1] + .0722 * d[i + 2];
+    vtoBrightness = sum / (d.length / 4);
+  } catch {}
 }
 async function switchVtoCamera() {
   if (!vtoLoop || !stream) return;
@@ -272,6 +302,7 @@ function captureFrame() {
 }
 function processFrame() {
   const frame = captureFrame(); if (!frame || !placeLayers()) return;
+  measureBrightness(frame);
   if (!visionReady()) return;
   const ts = Math.max(performance.now(), vtoLastTs + 1); vtoLastTs = ts;
   let status;
@@ -356,9 +387,13 @@ function setStatus(text, kind = '') {
 }
 function updateLiveStatus(status, pose, locked) {
   if (!accessoryAR?.ready) return setStatus(accessoryAR?.state === 'error' ? 'This 3D model could not be loaded' : 'Loading the 3D piece…', accessoryAR?.state === 'error' ? 'error' : 'adjust');
-  if (!status.found) return setStatus(VTO_COPY[vtoTarget()].search);
+  const dark = vtoBrightness < 62;
+  if (!status.found) return setStatus(dark ? (vtoTorchTrack && !vtoTorch ? 'Too dark to see clearly · tap the light' : 'Too dark · move to a brighter spot') : VTO_COPY[vtoTarget()].search, dark ? 'adjust' : '');
+  if (locked && !vtoFitTipShown && vtoMeasurements[vtoTarget()] == null && vtoTarget() !== 'neck') {
+    vtoFitTipShown = true; setTimeout(() => toast(`For an exact fit, tap the ruler and add your ${vtoTarget() === 'finger' ? 'ring finger' : 'wrist'} size`), 1800);
+  }
   if (!status.ready) return setStatus(status.guidance, 'adjust');
-  if (!locked) return setStatus('Hold still…', 'adjust');
+  if (!locked) return setStatus(dark && vtoTorchTrack && !vtoTorch ? 'Low light · tap the light for steadier tracking' : 'Hold still…', 'adjust');
   const t = vtoTarget(), away = pose && pose.dialFacing < -.35;
   if (t === 'wrist' && away) return setStatus(vtoCategory === 'watches' ? 'Turn your wrist to see the dial' : 'Turn your wrist toward the camera', 'locked');
   if (t === 'finger' && away) return setStatus('Turn your hand to see the stone', 'locked');
