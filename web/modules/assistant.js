@@ -7,7 +7,7 @@ function initChat() {
 }
 function addBubble(who, html) {
   const el = document.createElement('div'); el.className = 'bubble ' + who; el.innerHTML = html;
-  $('chatlog').appendChild(el); $('chatlog').scrollTop = $('chatlog').scrollHeight; return el;
+  $('chatlog').appendChild(el); $('chatlog').scrollTop = $('chatlog').scrollHeight; window.Motion?.pop(el); return el;
 }
 function pickCard(p) {
   return `<div class="pick"><div class="media">${productMedia(p)}</div><div class="b"><b>${esc(p.name)}</b><span class="price" style="font-size:14px">${money(p.price)}</span>
@@ -22,6 +22,7 @@ async function chat(text) {
     const products = (d.products || []).map(p => ({ ...p, ...(shopRows.find(r => r.id === p.id) || {}) }));
     typing.classList.remove('typing');
     typing.innerHTML = esc(d.answer) + (products.length ? `<div class="picks">${products.map(pickCard).join('')}</div>` : '');
+    window.Motion?.stagger(typing.querySelectorAll('.pick'), { y: 12, each: .07 });
     $('chatlog').scrollTop = $('chatlog').scrollHeight;
   } catch (e) { typing.classList.remove('typing'); typing.textContent = 'Sorry, I could not reach the stylist. ' + e.message; }
 }

@@ -1,8 +1,11 @@
 // ---- Shop ----
 let shopCategory = '', shopRows = [], searchTimer = null;
 function renderCategoryControls() {
-  $('catTiles').innerHTML = Object.entries(CATEGORY).map(([key, c]) =>
-    `<button class="cat" onclick="setShopCategory('${key}');$('collection').scrollIntoView({behavior:'smooth'})"><span class="ic">${icon(c.icon)}</span><span><b>${c.label}</b><small>${c.blurb}</small></span></button>`).join('');
+  if (!$('catTiles').children.length) {
+    $('catTiles').innerHTML = Object.entries(CATEGORY).map(([key, c]) =>
+      `<button class="cat" onclick="setShopCategory('${key}');$('collection').scrollIntoView({behavior:'smooth'})"><span class="ic">${icon(c.icon)}</span><span><b>${c.label}</b><small>${c.blurb}</small></span></button>`).join('');
+    window.Motion?.stagger('#catTiles .cat', { delay: .25 });
+  }
   $('categoryChips').innerHTML = [['', 'All'], ...Object.entries(CATEGORY).map(([k, c]) => [k, c.label])].map(([key, label]) =>
     `<button class="chip ${shopCategory === key ? 'active' : ''}" role="tab" aria-selected="${shopCategory === key}" onclick="setShopCategory('${key}')">${key ? icon(CATEGORY[key].icon) : ''}${label}</button>`).join('');
 }
@@ -36,6 +39,7 @@ function renderProducts() {
   const rows = sortedRows();
   $('resultCount').textContent = rows.length ? `${rows.length} piece${rows.length === 1 ? '' : 's'}` : '';
   $('products').innerHTML = rows.map(productCard).join('') || `<div class="empty">${icon('search')}<p>No pieces match${$('search').value ? ' “' + esc($('search').value) + '”' : ''}. Try another category or search.</p></div>`;
+  window.Motion?.stagger('#products .product');
 }
 document.addEventListener('DOMContentLoaded', () => {
   $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProducts, 280); });
@@ -72,6 +76,7 @@ async function openProduct(id) {
       </div>
     </div></div>`;
   openDialog('productDialog'); setStars(0); loadReviews(p.id);
+  window.Motion?.stagger('#productBody .pd-info > *', { y: 10, scale: 1, each: .04, duration: .35 });
   if (user) api('/history', { method: 'POST', body: { kind: 'product_view', detail: `${p.name} (product:${p.id})` } }).catch(() => {});
 }
 

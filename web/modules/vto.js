@@ -61,7 +61,7 @@ function updateFit(force) {
     const cm = body.wristCircumference ? body.wristCircumference * 100 : body.fingerDiameter * Math.PI * 100;
     $('vtoMeasurementResult').textContent = `Estimated ${t === 'finger' ? 'ring finger' : 'wrist'} ${cm.toFixed(1)} cm (${(cm / 2.54).toFixed(1)} in) from your hand. Enter a soft-tape reading for an exact fit.`;
   }
-  for (const id of ['vtoFit', 'stageFit']) { const el = $(id); el.textContent = text; el.className = 'fit-badge ' + kind; el.classList.toggle('hidden', !text); }
+  for (const id of ['vtoFit', 'stageFit']) { const el = $(id); el.textContent = text; el.className = 'fit-badge ' + kind; el.classList.toggle('hidden', !text); if (!force) { void el.offsetWidth; el.classList.add('bump'); } }
 }
 function vtoThumb(p) { return p.image ? `<img src="${esc(p.image)}" alt="">` : icon(CATEGORY[p.category]?.icon || 'cube'); }
 function renderVtoProducts() {
@@ -73,6 +73,8 @@ function renderVtoProducts() {
 }
 async function initTryOn() {
   renderVtoCats(); updateIntro(); updateMeasurementUI(); renderShots();
+  window.Motion?.stagger('.tryon-panel > *', { y: 14, scale: .98, each: .07, delay: .08 });
+  window.Motion?.stagger('#vtoIntro .intro-card > *', { y: 12, scale: .98, each: .06, delay: .1 });
   if (!vtoProducts.length || vtoProducts[0].category !== vtoCategory) await loadVtoProducts(vtoSelected?.id);
 }
 async function setVtoCategory(category, preferId) {
@@ -197,14 +199,14 @@ async function switchVtoCamera() {
 }
 function stopCameraStream() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } $('camera').srcObject = null; }
 function enterLive() {
-  document.body.classList.add('tryon-live');
+  window.Motion?.freeze(); document.body.classList.add('tryon-live');
   $('vtoIntro').classList.add('hidden'); $('stageBottom').classList.remove('hidden'); $('vtoStop').classList.remove('hidden'); $('vtoStep').classList.remove('hidden');
   $('cameraGuide').className = 'camera-guide show ' + vtoTarget(); renderVtoProducts();
 }
 function stopVto() {
   vtoLoop = false; vtoRunId++; vtoLocked = false; vtoStable = 0; clearInterval(vtoWatchdog);
   stopCameraStream(); accessoryAR?.hide(); $('vtoCanvas').style.visibility = 'hidden'; $('vtoFrame').style.visibility = 'hidden'; $('cameraWrap').classList.remove('synced');
-  document.body.classList.remove('tryon-live');
+  document.body.classList.remove('tryon-live', 'vto-locked');
   $('vtoIntro').classList.remove('hidden'); $('stageBottom').classList.add('hidden'); $('vtoStop').classList.add('hidden'); $('vtoStep').classList.add('hidden');
   $('cameraGuide').className = 'camera-guide ' + vtoTarget(); vtoStatusText = '';
 }
@@ -278,6 +280,7 @@ function processFrame() {
   vtoStable = status.ready ? Math.min(vtoStable + 1, 30) : 0;
   const locked = vtoStable >= 5 && !!pose;
   if (locked && !vtoLocked) { navigator.vibrate?.(10); if (user && vtoLoggedRun !== vtoRunId) { vtoLoggedRun = vtoRunId; api('/history', { method: 'POST', body: { kind: 'try_on', detail: `${vtoSelected?.name || 'Piece'} on your ${CATEGORY[vtoCategory].target.toLowerCase()}` } }).catch(() => {}); } }
+  if (locked !== vtoLocked) document.body.classList.toggle('vto-locked', locked);
   vtoLocked = locked;
   const guide = $('cameraGuide'); guide.classList.toggle('show', !locked); guide.classList.toggle('near', status.found && !locked); guide.classList.toggle('locked', locked);
   updateLiveStatus(status, pose, locked);

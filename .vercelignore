@@ -9,3 +9,4 @@ juvia.db-*
 uploads/**
 tools
 tests
+.claude

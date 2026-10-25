@@ -79,7 +79,7 @@ function show(id) {
   if (location.hash.slice(1) !== id) history.replaceState(null, '', '#' + id);
   const changed = currentView !== id; currentView = id;
   // Hash routes share their ids with the sections, so the browser jumps to them; views always open at the top.
-  if (changed) { window.scrollTo(0, 0); requestAnimationFrame(() => window.scrollTo(0, 0)); }
+  if (changed) { window.scrollTo(0, 0); requestAnimationFrame(() => window.scrollTo(0, 0)); window.Motion?.page($(id)); }
   if (id === 'tryon' && typeof initTryOn === 'function') initTryOn();
   if (id === 'history') loadHistory();
   if (id === 'assistant') initChat();

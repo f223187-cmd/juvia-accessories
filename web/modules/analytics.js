@@ -6,7 +6,9 @@ async function loadAnalytics() {
   try {
     const d = await api('/analytics'), act = d.interactions || {};
     $('analytics').innerHTML = [['Customers', d.users], ['Products', d.products], ['Reviews', d.reviews], ['Try-on sessions', act.try_on || 0]]
-      .map(([label, n]) => `<div class="stat"><small>${label}</small><b>${n}</b></div>`).join('');
+      .map(([label, n]) => `<div class="stat"><small>${label}</small><b data-to="${n}">${n}</b></div>`).join('');
+    window.Motion?.stagger('#analytics .stat', { y: 12, each: .06 });
+    document.querySelectorAll('#analytics b[data-to]').forEach(b => window.Motion?.countUp(b, Number(b.dataset.to)));
     $('catBars').innerHTML = bars(Object.entries(d.products_by_category || {}), Object.fromEntries(Object.entries(CATEGORY).map(([k, c]) => [k, c.label])));
     $('actBars').innerHTML = bars(Object.entries(act), Object.fromEntries(Object.entries(ACTIVITY).map(([k, v]) => [k, v[1]])));
   } catch (e) { msg(e.message); }
